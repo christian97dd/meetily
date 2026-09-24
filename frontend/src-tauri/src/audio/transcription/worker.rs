@@ -4,7 +4,8 @@
 
 use super::engine::TranscriptionEngine;
 use super::provider::TranscriptionError;
-use crate::audio::AudioChunk;
+use crate::audio::recording_state::DeviceType;
+use crate::audio::{diarization, AudioChunk};
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -69,6 +70,8 @@ pub fn start_transcription_task<R: Runtime>(
                 return;
             }
         };
+
+        diarization::start_session();
 
         // Create parallel workers for faster processing while preserving ALL chunks
         const NUM_WORKERS: usize = 1; // Serial processing ensures transcripts emit in chronological order
@@ -149,7 +152,10 @@ pub fn start_transcription_task<R: Runtime>(
 
                             let chunk_timestamp = chunk.timestamp;
                             let chunk_duration = chunk.data.len() as f64 / chunk.sample_rate as f64;
-                            let chunk_source = chunk.device_type.speaker_label();
+                            let chunk_source = match chunk.device_type {
+                                DeviceType::Microphone => DeviceType::Microphone.speaker_label().to_string(),
+                                DeviceType::System => diarization::system_speaker_key(&chunk.data),
+                            };
 
                             // Transcribe with provider-agnostic approach
                             match transcribe_chunk_with_provider(
@@ -207,7 +213,7 @@ pub fn start_transcription_task<R: Runtime>(
                                         let update = TranscriptUpdate {
                                             text: transcript,
                                             timestamp: format_current_timestamp(), // Wall-clock for reference
-                                            source: chunk_source.to_string(),
+                                            source: chunk_source,
                                             sequence_id,
                                             chunk_start_time: chunk_timestamp, // Legacy compatibility
                                             is_partial,
@@ -392,6 +398,7 @@ pub fn start_transcription_task<R: Runtime>(
             }
         }
 
+        diarization::end_session();
         info!("✅ Parallel transcription task completed - all workers finished, ready for model unload");
     })
 }

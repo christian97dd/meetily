@@ -553,6 +553,9 @@ pub fn run() {
                 }
             });
 
+            // Voice embedding model for telling remote speakers apart
+            audio::diarization::init(_app.handle());
+
             // Set Parakeet models directory
             parakeet_engine::commands::set_models_directory(&_app.handle());
 
