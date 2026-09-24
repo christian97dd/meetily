@@ -9,6 +9,8 @@ import { check, Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { getVersion } from '@tauri-apps/api/app';
 
+const UPDATES_ENABLED = false;
+
 export interface UpdateInfo {
   available: boolean;
   currentVersion: string;
@@ -39,6 +41,11 @@ export class UpdateService {
    * @returns Promise with update information
    */
   async checkForUpdates(force = false): Promise<UpdateInfo> {
+    // Fork: the configured endpoint serves upstream releases, installing one would replace this build.
+    if (!UPDATES_ENABLED) {
+      return { available: false, currentVersion: await getVersion() };
+    }
+
     // Prevent concurrent update checks
     if (this.updateCheckInProgress) {
       throw new Error('Update check already in progress');
