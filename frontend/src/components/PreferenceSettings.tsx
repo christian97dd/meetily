@@ -8,6 +8,46 @@ import Analytics from "@/lib/analytics"
 import AnalyticsConsentSwitch from "./AnalyticsConsentSwitch"
 import { useConfig, NotificationSettings } from "@/contexts/ConfigContext"
 
+interface MeetingDetectionSettings {
+  auto_record: boolean;
+}
+
+function MeetingAutoRecordSwitch() {
+  const [autoRecord, setAutoRecord] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    invoke<MeetingDetectionSettings>('get_meeting_detection_settings')
+      .then((settings) => setAutoRecord(settings.auto_record))
+      .catch((error) => {
+        console.error('Failed to load meeting detection settings:', error);
+        setAutoRecord(false);
+      });
+  }, []);
+
+  const handleChange = async (enabled: boolean) => {
+    const previous = autoRecord;
+    setAutoRecord(enabled);
+    try {
+      await invoke('set_meeting_detection_settings', { settings: { auto_record: enabled } });
+    } catch (error) {
+      console.error('Failed to save meeting detection settings:', error);
+      setAutoRecord(previous);
+    }
+  };
+
+  return (
+    <div className="flex items-center justify-between">
+      <div>
+        <h3 className="text-lg font-semibold text-gray-900 mb-2">Auto-record meetings</h3>
+        <p className="text-sm text-gray-600">
+          Start recording when a browser or meeting app (Meet, Zoom, Teams...) keeps the microphone on, and stop when it releases it
+        </p>
+      </div>
+      <Switch checked={autoRecord ?? false} disabled={autoRecord === null} onCheckedChange={handleChange} />
+    </div>
+  );
+}
+
 export function PreferenceSettings() {
   const {
     notificationSettings,
@@ -157,6 +197,10 @@ export function PreferenceSettings() {
           </div>
           <Switch checked={notificationsEnabledValue} onCheckedChange={setNotificationsEnabled} />
         </div>
+      </div>
+
+      <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
+        <MeetingAutoRecordSwitch />
       </div>
 
       {/* Data Storage Locations Section */}

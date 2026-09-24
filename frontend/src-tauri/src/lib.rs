@@ -41,6 +41,7 @@ pub mod audio;
 pub mod config;
 pub mod console_utils;
 pub mod database;
+pub mod meeting_detector;
 pub mod notifications;
 pub mod ollama;
 pub mod onboarding;
@@ -511,6 +512,9 @@ pub fn run() {
                 log::error!("Failed to create system tray: {}", e);
             }
 
+            // Uses the tray's start/stop paths, so it must run after the tray exists
+            meeting_detector::spawn(_app.handle().clone());
+
             // Initialize notification system with proper defaults
             log::info!("Initializing notification system...");
             let app_for_notif = _app.handle().clone();
@@ -814,6 +818,8 @@ pub fn run() {
             whisper_engine::commands::open_models_folder,
             // Onboarding commands
             onboarding::get_onboarding_status,
+            meeting_detector::get_meeting_detection_settings,
+            meeting_detector::set_meeting_detection_settings,
             onboarding::save_onboarding_status_cmd,
             onboarding::reset_onboarding_status_cmd,
             onboarding::complete_onboarding,
