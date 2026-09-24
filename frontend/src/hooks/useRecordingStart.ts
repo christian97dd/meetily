@@ -57,7 +57,15 @@ export function useRecordingStart(
   const { setStatus } = useRecordingState();
 
   // Generate meeting title with timestamp
-  const generateMeetingTitle = useCallback(() => {
+  const generateMeetingTitle = useCallback(async () => {
+    try {
+      // Null when calendar naming is off, access wasn't granted, or no event is happening now
+      const calendarTitle = await invoke<string | null>('get_current_calendar_event_title');
+      if (calendarTitle) return calendarTitle;
+    } catch (error) {
+      console.warn('Calendar lookup for meeting title failed:', error);
+    }
+
     const now = new Date();
     const day = String(now.getDate()).padStart(2, '0');
     const month = String(now.getMonth() + 1).padStart(2, '0');
@@ -149,7 +157,7 @@ export function useRecordingStart(
 
       console.log('Selected transcription model ready - setting up meeting title and state');
 
-      const randomTitle = generateMeetingTitle();
+      const randomTitle = await generateMeetingTitle();
       setMeetingTitle(randomTitle);
 
       // Set STARTING status before initiating backend recording
@@ -243,7 +251,7 @@ export function useRecordingStart(
           // Start the actual backend recording
           try {
             // Generate meeting title
-            const generatedMeetingTitle = generateMeetingTitle();
+            const generatedMeetingTitle = await generateMeetingTitle();
 
             // Set STARTING status before initiating backend recording
             setStatus(RecordingStatus.STARTING, 'Initializing recording...');
@@ -341,7 +349,7 @@ export function useRecordingStart(
 
       try {
         // Generate meeting title
-        const generatedMeetingTitle = generateMeetingTitle();
+        const generatedMeetingTitle = await generateMeetingTitle();
 
         // Set STARTING status before initiating backend recording
         setStatus(RecordingStatus.STARTING, 'Initializing recording...');

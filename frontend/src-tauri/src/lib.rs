@@ -38,6 +38,7 @@ pub(crate) use perf_trace;
 pub mod analytics;
 pub mod api;
 pub mod audio;
+pub mod calendar;
 pub mod config;
 pub mod console_utils;
 pub mod database;
@@ -826,6 +827,9 @@ pub fn run() {
             meeting_detector::set_meeting_detection_settings,
             onboarding::save_onboarding_status_cmd,
             onboarding::reset_onboarding_status_cmd,
+            calendar::get_calendar_naming_settings,
+            calendar::set_calendar_naming_enabled,
+            calendar::get_current_calendar_event_title,
             onboarding::complete_onboarding,
             // System settings commands
             #[cfg(target_os = "macos")]
