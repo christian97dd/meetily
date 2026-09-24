@@ -90,6 +90,7 @@
     --secondary-foreground: 0 0% 9%;
     --muted: 0 0% 96.1%;
     --muted-foreground: 0 0% 45.1%;
+    --muted-strong: 0 0% 89.8%;
     --accent: 0 0% 96.1%;
     --accent-foreground: 0 0% 9%;
     --destructive: 0 84.2% 60.2%;
@@ -118,6 +119,7 @@
     --secondary-foreground: 0 0% 98%;
     --muted: 0 0% 14.9%;
     --muted-foreground: 0 0% 63.9%;
+    --muted-strong: 0 0% 22%;
     --accent: 0 0% 14.9%;
     --accent-foreground: 0 0% 98%;
     --destructive: 0 62.8% 30.6%;
@@ -178,6 +180,18 @@
   .custom-scrollbar {
     scrollbar-width: thin;
     scrollbar-color: #d1d5db transparent;
+  }
+
+  .dark .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: #3f3f46;
+  }
+
+  .dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #52525b;
+  }
+
+  .dark .custom-scrollbar {
+    scrollbar-color: #3f3f46 transparent;
   }
 
   /* BlockNote Editor - Override fixed dimensions for responsive layout */

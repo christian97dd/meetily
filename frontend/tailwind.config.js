@@ -38,7 +38,9 @@ module.exports = {
   			},
   			muted: {
   				DEFAULT: 'hsl(var(--muted))',
-  				foreground: 'hsl(var(--muted-foreground))'
+  				foreground: 'hsl(var(--muted-foreground))',
+  				// A step darker than muted (tracks, pressed/hover fills, disabled controls)
+  				strong: 'hsl(var(--muted-strong))'
   			},
   			accent: {
   				DEFAULT: 'hsl(var(--accent))',

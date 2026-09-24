@@ -25,6 +25,7 @@ import { RecordingPostProcessingProvider } from '@/contexts/RecordingPostProcess
 import { ImportAudioDialog, ImportDropOverlay } from '@/components/ImportAudio'
 import { ImportDialogProvider } from '@/contexts/ImportDialogContext'
 import { MeetingSuggestionBanner } from '@/components/MeetingSuggestionBanner'
+import { ThemeProvider, THEME_STORAGE_KEY, useTheme } from '@/contexts/ThemeContext'
 import { isAudioExtension, getAudioFormatsDisplayList } from '@/constants/audioFormats'
 
 
@@ -37,6 +38,11 @@ const sourceSans3 = Source_Sans_3({
 // Module-level component — stable reference across RootLayout re-renders.
 // Defined here (not inside RootLayout) so React never sees a new function type
 // on re-render, which would cause unmount/remount and break initialization logic.
+function ThemedToaster() {
+  const { resolvedTheme } = useTheme()
+  return <Toaster position="bottom-center" richColors closeButton theme={resolvedTheme} />
+}
+
 function ConditionalImportDialog({
   showImportDialog,
   handleImportDialogClose,
@@ -232,8 +238,17 @@ export default function RootLayout({
   }
 
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        {/* Applies the saved theme before first paint so dark mode doesn't flash white */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `try{var t=localStorage.getItem('${THEME_STORAGE_KEY}');var d=t==='dark'||((!t||t==='system')&&matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.classList.toggle('dark',d);document.documentElement.style.colorScheme=d?'dark':'light'}catch(e){}`,
+          }}
+        />
+      </head>
       <body className={`${sourceSans3.variable} font-sans antialiased`}>
+        <ThemeProvider>
         <AnalyticsProvider>
           <RecordingStateProvider>
             <TranscriptProvider>
@@ -278,7 +293,8 @@ export default function RootLayout({
           </RecordingStateProvider>
         </AnalyticsProvider>
 
-        <Toaster position="bottom-center" richColors closeButton />
+        <ThemedToaster />
+        </ThemeProvider>
       </body>
     </html>
   )

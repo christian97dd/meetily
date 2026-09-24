@@ -8,6 +8,7 @@ import { Block } from '@blocknote/core';
 import { useCreateBlockNote } from '@blocknote/react';
 import { BlockNoteView } from '@blocknote/shadcn';
 import { blocksToMarkdownSafely } from '@/lib/blocknote-markdown';
+import { useTheme } from '@/contexts/ThemeContext';
 import "@blocknote/shadcn/style.css";
 
 // Dynamically import BlockNote Editor to avoid SSR issues
@@ -82,6 +83,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   const isContentLoaded = useRef(false);
 
   // Create BlockNote editor for markdown parsing
+  const { resolvedTheme } = useTheme();
   const editor = useCreateBlockNote({
     initialContent: undefined
   });
@@ -265,7 +267,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
                 handleEditorChange(editor.document);
               }
             }}
-            theme="light"
+            theme={resolvedTheme}
           />
         </div>
       </div>
