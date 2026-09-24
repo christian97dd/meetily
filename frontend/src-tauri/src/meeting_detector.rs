@@ -1,5 +1,6 @@
-//! Auto-records meetings: starts a recording when a meeting app (browser, Zoom, Teams...) keeps
-//! the microphone open, and stops it once the app releases the microphone.
+//! Detects meetings: when a meeting app (browser, Zoom, Teams...) keeps the microphone open it either
+//! suggests recording (notification + in-app banner) or, in auto mode, starts a recording and stops it
+//! once the app releases the microphone.
 //!
 //! "Meeting app using the mic" is read from CoreAudio's per-process state (macOS 14.2+), so a call
 //! is detected no matter which tab or window it runs in. The detector only stops recordings it
@@ -8,7 +9,8 @@
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Emitter, Runtime};
+use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_store::StoreExt;
 
 const STORE_FILE: &str = "meeting-detection.json";
@@ -39,9 +41,32 @@ const MEETING_APP_BUNDLE_PREFIXES: &[&str] = &[
     "com.apple.FaceTime",
 ];
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum DetectionMode {
+    #[default]
+    Off,
+    Suggest,
+    Auto,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct MeetingDetectionSettings {
-    pub auto_record: bool,
+    #[serde(default)]
+    pub mode: DetectionMode,
+    // Settings saved before `mode` existed only had this flag
+    #[serde(default, skip_serializing)]
+    auto_record: bool,
+}
+
+impl MeetingDetectionSettings {
+    fn effective_mode(&self) -> DetectionMode {
+        if self.mode == DetectionMode::Off && self.auto_record {
+            DetectionMode::Auto
+        } else {
+            self.mode
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -128,6 +153,12 @@ impl AutoRecordState {
         }
         None
     }
+
+    /// The start was offered to the user instead of performed: don't offer it again until the meeting
+    /// ends, and treat a recording the user starts as manual (never auto-stopped).
+    pub fn start_handed_to_user(&mut self) {
+        self.phase = Phase::WaitForMeetingEnd;
+    }
 }
 
 pub fn is_meeting_app(bundle_id: &str) -> bool {
@@ -170,16 +201,32 @@ pub fn load_settings<R: Runtime>(app: &AppHandle<R>) -> MeetingDetectionSettings
         .unwrap_or_default()
 }
 
+fn suggest_recording<R: Runtime>(app: &AppHandle<R>, apps: &[String]) {
+    log::info!("Meeting detector: meeting detected ({:?}), suggesting to record", apps);
+    let _ = app.emit("meeting-suggested", apps);
+    if let Err(e) = app
+        .notification()
+        .builder()
+        .title("Meeting detected")
+        .body("Open meetily and press Record to transcribe it")
+        .show()
+    {
+        log::warn!("Meeting detector: failed to show notification: {}", e);
+    }
+}
+
 /// Polls CoreAudio and drives recording start/stop through the same paths the tray menu uses.
 pub fn spawn<R: Runtime>(app: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
         let mut state = AutoRecordState::default();
+        let mut suggestion_shown = false;
         let mut interval = tokio::time::interval(POLL_INTERVAL);
 
         loop {
             interval.tick().await;
 
-            if !load_settings(&app).auto_record {
+            let mode = load_settings(&app).effective_mode();
+            if mode == DetectionMode::Off {
                 state = AutoRecordState::default();
                 continue;
             }
@@ -187,7 +234,17 @@ pub fn spawn<R: Runtime>(app: AppHandle<R>) {
             let apps = tokio::task::spawn_blocking(meeting_apps_using_mic).await.unwrap_or_default();
             let is_recording = crate::audio::recording_commands::is_recording().await;
 
+            if suggestion_shown && (apps.is_empty() || is_recording) {
+                suggestion_shown = false;
+                let _ = app.emit("meeting-suggestion-cleared", ());
+            }
+
             match state.tick(!apps.is_empty(), is_recording, Instant::now()) {
+                Some(DetectorAction::StartRecording) if mode == DetectionMode::Suggest => {
+                    state.start_handed_to_user();
+                    suggest_recording(&app, &apps);
+                    suggestion_shown = true;
+                }
                 Some(DetectorAction::StartRecording) => {
                     if crate::tray::check_can_record(&app).await {
                         log::info!("Meeting detector: meeting detected ({:?}), starting recording", apps);
@@ -322,6 +379,28 @@ mod tests {
         c.at(6, true, false);
         assert_eq!(c.at(40, true, false), None);
         assert_eq!(c.at(100, true, false), None);
+    }
+
+    #[test]
+    fn a_suggested_start_is_not_repeated_nor_auto_stopped() {
+        let mut c = Clock::new();
+        c.at(0, true, false);
+        assert_eq!(c.at(6, true, false), Some(DetectorAction::StartRecording));
+        c.state.start_handed_to_user();
+        assert_eq!(c.at(20, true, false), None);
+        // The user presses Record: that recording is theirs
+        assert_eq!(c.at(30, true, true), None);
+        assert_eq!(c.at(100, false, true), None);
+        assert_eq!(c.at(200, false, true), None);
+    }
+
+    #[test]
+    fn legacy_auto_record_flag_maps_to_auto_mode() {
+        let legacy: MeetingDetectionSettings = serde_json::from_str(r#"{"auto_record":true}"#).unwrap();
+        assert_eq!(legacy.effective_mode(), DetectionMode::Auto);
+        let current: MeetingDetectionSettings = serde_json::from_str(r#"{"mode":"suggest"}"#).unwrap();
+        assert_eq!(current.effective_mode(), DetectionMode::Suggest);
+        assert_eq!(MeetingDetectionSettings::default().effective_mode(), DetectionMode::Off);
     }
 
     #[test]
