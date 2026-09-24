@@ -19,8 +19,9 @@ export interface Transcript {
   speaker?: TranscriptSpeaker; // Audio source; absent for imported or pre-fork meetings
 }
 
-// 'mic' = the local user, 'system' = everyone heard through the computer's audio
-export type TranscriptSpeaker = 'mic' | 'system';
+// 'mic' = the local user, 'system' = everyone heard through the computer's audio,
+// 'system-N' = remote speaker N when diarization could tell voices apart
+export type TranscriptSpeaker = 'mic' | 'system' | `system-${number}`;
 
 export interface TranscriptUpdate {
   text: string;

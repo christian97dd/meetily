@@ -9,7 +9,7 @@ use crate::{
         models::MeetingModel,
         repositories::{
             meeting::MeetingsRepository, setting::SettingsRepository,
-            transcript::TranscriptsRepository,
+            speaker::SpeakersRepository, transcript::TranscriptsRepository,
         },
     },
     state::AppState,
@@ -901,6 +901,31 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
             Err(format!("Failed to retrieve transcripts: {}", e))
         }
     }
+}
+
+/// Custom speaker names for a meeting, keyed by transcript speaker ('mic', 'system', 'system-N')
+#[tauri::command]
+pub async fn api_get_meeting_speakers<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+) -> Result<HashMap<String, String>, String> {
+    SpeakersRepository::get_names(state.db_manager.pool(), &meeting_id)
+        .await
+        .map_err(|e| format!("Failed to load speaker names: {}", e))
+}
+
+#[tauri::command]
+pub async fn api_set_meeting_speaker<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+    speaker_key: String,
+    name: String,
+) -> Result<(), String> {
+    SpeakersRepository::set_name(state.db_manager.pool(), &meeting_id, &speaker_key, &name)
+        .await
+        .map_err(|e| format!("Failed to save speaker name: {}", e))
 }
 
 #[tauri::command]

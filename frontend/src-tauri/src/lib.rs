@@ -724,6 +724,8 @@ pub fn run() {
             api::api_get_model_config,
             api::api_save_model_config,
             api::api_get_api_key,
+            api::api_get_meeting_speakers,
+            api::api_set_meeting_speaker,
             // api::api_get_auto_generate_setting,
             // api::api_save_auto_generate_setting,
             api::api_get_transcript_config,

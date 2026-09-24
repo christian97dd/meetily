@@ -18,7 +18,7 @@ import {
   readCachedDetectedSummaryLanguage,
 } from '@/lib/summary-language-preferences';
 import { parseSummaryContent, readSummaryMetadata } from '@/lib/summary-content';
-import { withSpeakerPrefix } from '@/lib/speaker';
+import { fetchSpeakerNames, SpeakerNames, withSpeakerPrefix } from '@/lib/speaker';
 
 async function resolveSummaryLanguage(
   meetingId: string,
@@ -434,7 +434,7 @@ export function useSummaryGeneration({
     }
   }, []);
 
-  const buildSummaryTranscriptPayload = useCallback((allTranscripts: Transcript[]) => {
+  const buildSummaryTranscriptPayload = useCallback((allTranscripts: Transcript[], speakerNames: SpeakerNames) => {
     const formatTime = (seconds: number | undefined, fallbackTimestamp: string): string => {
       if (seconds === undefined) {
         return fallbackTimestamp;
@@ -445,7 +445,7 @@ export function useSummaryGeneration({
 
     return {
       transcriptText: allTranscripts
-        .map((transcript) => `${formatTime(transcript.audio_start_time, transcript.timestamp)} ${withSpeakerPrefix(transcript.text, transcript.speaker)}`)
+        .map((transcript) => `${formatTime(transcript.audio_start_time, transcript.timestamp)} ${withSpeakerPrefix(transcript.text, transcript.speaker, speakerNames)}`)
         .join('\n'),
       transcriptTexts: allTranscripts.map((transcript) => transcript.text),
     };
@@ -501,7 +501,7 @@ export function useSummaryGeneration({
     }
 
     await processSummary({
-      ...buildSummaryTranscriptPayload(allTranscripts),
+      ...buildSummaryTranscriptPayload(allTranscripts, await fetchSpeakerNames(meeting.id)),
       customPrompt,
     });
   }, [
@@ -526,7 +526,7 @@ export function useSummaryGeneration({
     }
 
     await processSummary({
-      ...buildSummaryTranscriptPayload(allTranscripts),
+      ...buildSummaryTranscriptPayload(allTranscripts, await fetchSpeakerNames(meeting.id)),
       isRegeneration: true
     });
   }, [meeting.id, fetchAllTranscripts, buildSummaryTranscriptPayload, processSummary]);
