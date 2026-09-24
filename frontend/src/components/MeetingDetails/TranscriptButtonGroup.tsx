@@ -3,7 +3,9 @@
 import { useState, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
-import { Copy, FolderOpen, RefreshCw } from 'lucide-react';
+import { Copy, Download, FolderOpen, RefreshCw } from 'lucide-react';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import type { TranscriptFormat } from '@/lib/transcript-document';
 import Analytics from '@/lib/analytics';
 import { RetranscribeDialog } from './RetranscribeDialog';
 import { useConfig } from '@/contexts/ConfigContext';
@@ -12,6 +14,7 @@ import { useConfig } from '@/contexts/ConfigContext';
 interface TranscriptButtonGroupProps {
   transcriptCount: number;
   onCopyTranscript: () => void;
+  onExportTranscript?: (format: TranscriptFormat) => void;
   onOpenMeetingFolder: () => Promise<void>;
   meetingId?: string;
   meetingFolderPath?: string | null;
@@ -22,6 +25,7 @@ interface TranscriptButtonGroupProps {
 export function TranscriptButtonGroup({
   transcriptCount,
   onCopyTranscript,
+  onExportTranscript,
   onOpenMeetingFolder,
   meetingId,
   meetingFolderPath,
@@ -55,6 +59,27 @@ export function TranscriptButtonGroup({
           <span className="hidden @[22rem]:inline">Copy</span>
         </Button>
 
+        {onExportTranscript && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className="px-2 @[22rem]:px-3"
+                disabled={transcriptCount === 0}
+                title={transcriptCount === 0 ? 'No transcript available' : 'Export Transcript'}
+              >
+                <Download />
+                <span className="hidden @[22rem]:inline">Export</span>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start">
+              <DropdownMenuItem onClick={() => onExportTranscript('md')}>Markdown (.md)</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => onExportTranscript('txt')}>Plain text (.txt)</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
+
         <Button
           size="sm"
           variant="outline"
@@ -73,7 +98,7 @@ export function TranscriptButtonGroup({
           <Button
             size="sm"
             variant="outline"
-            className="bg-gradient-to-r from-blue-50 to-purple-50 hover:from-blue-100 hover:to-purple-100 border-blue-200 px-2 @[22rem]:px-4"
+            className="bg-gradient-to-r from-blue-50 dark:from-blue-950/40 to-purple-50 dark:to-purple-950/40 hover:from-blue-100 dark:hover:from-blue-900/40 hover:to-purple-100 dark:hover:to-purple-900/40 border-blue-200 dark:border-blue-800 px-2 @[22rem]:px-4"
             onClick={() => {
               Analytics.trackButtonClick('enhance_transcript', 'meeting_details');
               setShowRetranscribeDialog(true);

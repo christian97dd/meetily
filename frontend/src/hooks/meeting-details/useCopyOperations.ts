@@ -5,7 +5,8 @@ import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { hasVisibleSummaryContent } from '@/lib/summary-content';
-import { withSpeakerPrefix } from '@/lib/speaker';
+import { fetchSpeakerNames } from '@/lib/speaker';
+import { buildTranscriptDocument, TranscriptFormat, transcriptFileName } from '@/lib/transcript-document';
 
 interface UseCopyOperationsProps {
   meeting: any;
@@ -73,25 +74,11 @@ export function useCopyOperations({
 
     console.log(`✅ Copying ${allTranscripts.length} transcripts to clipboard`);
 
-    // Format timestamps as recording-relative [MM:SS] instead of wall-clock time
-    const formatTime = (seconds: number | undefined, fallbackTimestamp: string): string => {
-      if (seconds === undefined) {
-        // For old transcripts without audio_start_time, use wall-clock time
-        return fallbackTimestamp;
-      }
-      const totalSecs = Math.floor(seconds);
-      const mins = Math.floor(totalSecs / 60);
-      const secs = totalSecs % 60;
-      return `[${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}]`;
-    };
+    const title = meetingTitle ?? meeting.title;
+    const speakerNames = await fetchSpeakerNames(meeting.id);
+    const content = buildTranscriptDocument(meeting, title, allTranscripts, speakerNames, 'md');
 
-    const header = `# Transcript of the Meeting: ${meeting.id} - ${meetingTitle ?? meeting.title}\n\n`;
-    const date = `## Date: ${new Date(meeting.created_at).toLocaleDateString()}\n\n`;
-    const fullTranscript = allTranscripts
-      .map(t => `${formatTime(t.audio_start_time, t.timestamp)} ${withSpeakerPrefix(t.text, t.speaker)}  `)
-      .join('\n');
-
-    await navigator.clipboard.writeText(header + date + fullTranscript);
+    await navigator.clipboard.writeText(content);
     toast.success("Transcript copied to clipboard");
 
     // Track copy analytics
@@ -104,6 +91,31 @@ export function useCopyOperations({
       transcript_length: allTranscripts.length.toString(),
       word_count: wordCount.toString()
     });
+  }, [meeting, meetingTitle, fetchAllTranscripts]);
+
+  const handleExportTranscript = useCallback(async (format: TranscriptFormat) => {
+    const allTranscripts = await fetchAllTranscripts(meeting.id);
+    if (!allTranscripts.length) {
+      toast.error('No transcripts available to export');
+      return;
+    }
+
+    const title = meetingTitle ?? meeting.title;
+    const speakerNames = await fetchSpeakerNames(meeting.id);
+    const content = buildTranscriptDocument(meeting, title, allTranscripts, speakerNames, format);
+
+    try {
+      const savedPath = await invokeTauri<string | null>('export_text_file', {
+        suggestedName: transcriptFileName(title, format),
+        content,
+      });
+      if (savedPath) {
+        toast.success('Transcript exported', { description: savedPath });
+      }
+    } catch (error) {
+      console.error('Failed to export transcript:', error);
+      toast.error('Failed to export transcript');
+    }
   }, [meeting, meetingTitle, fetchAllTranscripts]);
 
   // Copy summary to clipboard
@@ -197,6 +209,7 @@ export function useCopyOperations({
 
   return {
     handleCopyTranscript,
+    handleExportTranscript,
     handleCopySummary,
   };
 }

@@ -42,6 +42,7 @@ pub mod config;
 pub mod console_utils;
 pub mod database;
 pub mod meeting_detector;
+pub mod export;
 pub mod notifications;
 pub mod ollama;
 pub mod onboarding;
@@ -624,6 +625,7 @@ pub fn run() {
             analytics::commands::disable_analytics,
             analytics::commands::track_event,
             analytics::commands::identify_user,
+            export::export_text_file,
             analytics::commands::track_meeting_started,
             analytics::commands::track_recording_started,
             analytics::commands::track_recording_stopped,

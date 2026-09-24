@@ -4,13 +4,18 @@ import { Transcript, TranscriptSegmentData } from '@/types';
 import { TranscriptView } from '@/components/TranscriptView';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
-import { useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { toast } from 'sonner';
+import { fetchSpeakerNames, saveSpeakerName, SpeakerNames, speakerLabel } from '@/lib/speaker';
+import { SpeakerRenameDialog } from './SpeakerRenameDialog';
+import type { TranscriptFormat } from '@/lib/transcript-document';
 
 interface TranscriptPanelProps {
   transcripts: Transcript[];
   customPrompt: string;
   onPromptChange: (value: string) => void;
   onCopyTranscript: () => void;
+  onExportTranscript?: (format: TranscriptFormat) => void;
   onOpenMeetingFolder: () => Promise<void>;
   isRecording: boolean;
   disableAutoScroll?: boolean;
@@ -35,6 +40,7 @@ export function TranscriptPanel({
   customPrompt,
   onPromptChange,
   onCopyTranscript,
+  onExportTranscript,
   onOpenMeetingFolder,
   isRecording,
   disableAutoScroll = false,
@@ -65,13 +71,33 @@ export function TranscriptPanel({
     }));
   }, [transcripts, usePagination, segments]);
 
+  const [speakerNames, setSpeakerNames] = useState<SpeakerNames>({});
+  const [renamingSpeaker, setRenamingSpeaker] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!meetingId) return;
+    fetchSpeakerNames(meetingId).then(setSpeakerNames);
+  }, [meetingId]);
+
+  const handleSaveSpeakerName = useCallback(async (name: string) => {
+    if (!meetingId || !renamingSpeaker) return;
+    try {
+      await saveSpeakerName(meetingId, renamingSpeaker, name);
+      setSpeakerNames(await fetchSpeakerNames(meetingId));
+    } catch (error) {
+      console.error('Failed to rename speaker:', error);
+      toast.error('Failed to rename speaker');
+    }
+  }, [meetingId, renamingSpeaker]);
+
   return (
-    <div className="flex h-full min-w-0 w-full bg-white flex-col relative @container">
+    <div className="flex h-full min-w-0 w-full bg-background flex-col relative @container">
       {/* Title area */}
-      <div className="p-4 border-b border-gray-200">
+      <div className="p-4 border-b border-border">
         <TranscriptButtonGroup
           transcriptCount={usePagination ? (totalCount ?? convertedSegments.length) : (transcripts?.length || 0)}
           onCopyTranscript={onCopyTranscript}
+          onExportTranscript={onExportTranscript}
           onOpenMeetingFolder={onOpenMeetingFolder}
           meetingId={meetingId}
           meetingFolderPath={meetingFolderPath}
@@ -95,15 +121,23 @@ export function TranscriptPanel({
           totalCount={totalCount}
           loadedCount={loadedCount}
           onLoadMore={onLoadMore}
+          speakerNames={speakerNames}
+          onRenameSpeaker={meetingId && !isRecording ? setRenamingSpeaker : undefined}
         />
       </div>
 
+      <SpeakerRenameDialog
+        currentLabel={renamingSpeaker ? speakerLabel(renamingSpeaker, speakerNames) : null}
+        onClose={() => setRenamingSpeaker(null)}
+        onSave={handleSaveSpeakerName}
+      />
+
       {/* Custom prompt input at bottom of transcript section */}
       {!isRecording && convertedSegments.length > 0 && (
-        <div className="p-1 border-t border-gray-200">
+        <div className="p-1 border-t border-border">
           <textarea
             placeholder="Add context for AI summary. For example people involved, meeting overview, objective etc..."
-            className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 bg-white shadow-sm min-h-[80px] resize-y"
+            className="w-full px-3 py-2 border border-border rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 bg-background shadow-sm min-h-[80px] resize-y"
             value={customPrompt}
             onChange={(e) => onPromptChange(e.target.value)}
           />
