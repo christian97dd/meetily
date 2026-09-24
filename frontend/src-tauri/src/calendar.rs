@@ -44,8 +44,8 @@ mod eventkit {
     const LOOKAHEAD_SECS: f64 = 15.0 * 60.0;
 
     pub fn has_access() -> bool {
-        unsafe { EKEventStore::authorizationStatusForEntityType(EKEntityType::Event) }
-            == EKAuthorizationStatus::FullAccess
+        let status = unsafe { EKEventStore::authorizationStatusForEntityType(EKEntityType::Event) };
+        status == EKAuthorizationStatus::FullAccess
     }
 
     /// Shows the macOS permission prompt the first time; later calls return the stored answer.
