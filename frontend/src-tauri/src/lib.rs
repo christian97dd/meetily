@@ -42,8 +42,8 @@ pub mod calendar;
 pub mod config;
 pub mod console_utils;
 pub mod database;
-pub mod meeting_detector;
 pub mod export;
+pub mod meeting_detector;
 pub mod notifications;
 pub mod ollama;
 pub mod onboarding;
@@ -625,11 +625,11 @@ pub fn run() {
             get_transcription_status,
             read_audio_file,
             save_transcript,
+            export::export_text_file,
             analytics::commands::init_analytics,
             analytics::commands::disable_analytics,
             analytics::commands::track_event,
             analytics::commands::identify_user,
-            export::export_text_file,
             analytics::commands::track_meeting_started,
             analytics::commands::track_recording_started,
             analytics::commands::track_recording_stopped,
@@ -724,14 +724,14 @@ pub fn run() {
             groq::groq::get_groq_models,
             api::api_get_meetings,
             api::api_search_transcripts,
+            api::api_get_meeting_speakers,
+            api::api_set_meeting_speaker,
             api::api_get_profile,
             api::api_save_profile,
             api::api_update_profile,
             api::api_get_model_config,
             api::api_save_model_config,
             api::api_get_api_key,
-            api::api_get_meeting_speakers,
-            api::api_set_meeting_speaker,
             // api::api_get_auto_generate_setting,
             // api::api_save_auto_generate_setting,
             api::api_get_transcript_config,
@@ -827,12 +827,12 @@ pub fn run() {
             // Onboarding commands
             onboarding::get_onboarding_status,
             meeting_detector::get_meeting_detection_settings,
-            meeting_detector::set_meeting_detection_settings,
-            onboarding::save_onboarding_status_cmd,
-            onboarding::reset_onboarding_status_cmd,
             calendar::get_calendar_naming_settings,
             calendar::set_calendar_naming_enabled,
             calendar::get_current_calendar_event_title,
+            meeting_detector::set_meeting_detection_settings,
+            onboarding::save_onboarding_status_cmd,
+            onboarding::reset_onboarding_status_cmd,
             onboarding::complete_onboarding,
             // System settings commands
             #[cfg(target_os = "macos")]
