@@ -14,6 +14,16 @@ pub enum DeviceType {
     System,
 }
 
+impl DeviceType {
+    /// Value stored in `transcripts.speaker` (see migration 20251110000001_add_speaker_field).
+    pub fn speaker_label(&self) -> &'static str {
+        match self {
+            DeviceType::Microphone => "mic",
+            DeviceType::System => "system",
+        }
+    }
+}
+
 /// Audio chunk with metadata for processing
 #[derive(Debug, Clone)]
 pub struct AudioChunk {
