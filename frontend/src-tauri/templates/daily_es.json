@@ -1,0 +1,29 @@
+{
+  "name": "Daily (ES)",
+  "description": "Daily del equipo: qué hizo cada uno, qué va a hacer y qué lo bloquea. En español.",
+  "sections": [
+    {
+      "title": "Resumen",
+      "instruction": "En español, dos o tres oraciones con lo más importante de la daily.",
+      "format": "paragraph"
+    },
+    {
+      "title": "Avances",
+      "instruction": "En español, lo que cada persona terminó desde la última daily. Usá los nombres de los hablantes tal como aparecen en la transcripción.",
+      "format": "list",
+      "item_format": "| **Persona** | **Avance** |\n| --- | --- |"
+    },
+    {
+      "title": "Próximos pasos",
+      "instruction": "En español, en qué va a trabajar cada persona hoy.",
+      "format": "list",
+      "item_format": "| **Persona** | **Plan** |\n| --- | --- |"
+    },
+    {
+      "title": "Bloqueos",
+      "instruction": "En español, impedimentos mencionados, quién está bloqueado y quién puede destrabarlo. Si no hubo, escribí 'Sin bloqueos'.",
+      "format": "list",
+      "item_format": "| **Persona** | **Bloqueo** | **Quién ayuda** |\n| --- | --- | --- |"
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "name": "Refinamiento (ES)",
+  "description": "Refinamiento o grooming de tickets: alcance, criterios, estimaciones y dudas abiertas. En español.",
+  "sections": [
+    {
+      "title": "Tickets tratados",
+      "instruction": "En español, cada ticket o historia discutida con su identificador si se mencionó (por ejemplo APPSRN-123) y una línea de qué se definió.",
+      "format": "list",
+      "item_format": "| **Ticket** | **Qué se definió** | **Estimación** |\n| --- | --- | --- |"
+    },
+    {
+      "title": "Criterios de aceptación",
+      "instruction": "En español, los criterios de aceptación acordados, agrupados por ticket.",
+      "format": "list"
+    },
+    {
+      "title": "Decisiones técnicas",
+      "instruction": "En español, decisiones de implementación o diseño tomadas y el motivo si se dijo.",
+      "format": "list"
+    },
+    {
+      "title": "Dudas abiertas",
+      "instruction": "En español, preguntas sin resolver, a quién hay que consultar y quién se ocupa.",
+      "format": "list",
+      "item_format": "| **Duda** | **Responsable** |\n| --- | --- |"
+    }
+  ]
+}

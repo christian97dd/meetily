@@ -1,0 +1,27 @@
+{
+  "name": "Reunión con cliente (ES)",
+  "description": "Reunión con un cliente: necesidades, problemas reportados, acuerdos y próximos pasos. En español.",
+  "sections": [
+    {
+      "title": "Resumen",
+      "instruction": "En español, un párrafo con el objetivo de la reunión y el resultado.",
+      "format": "paragraph"
+    },
+    {
+      "title": "Necesidades y problemas del cliente",
+      "instruction": "En español, lo que el cliente pidió o reportó, con el impacto que describió.",
+      "format": "list"
+    },
+    {
+      "title": "Acuerdos",
+      "instruction": "En español, compromisos asumidos por cada parte.",
+      "format": "list"
+    },
+    {
+      "title": "Próximos pasos",
+      "instruction": "En español, acciones con responsable y fecha si se mencionaron. Incluí el fragmento y el timestamp de la transcripción donde se acordó.",
+      "format": "list",
+      "item_format": "| **Responsable** | **Acción** | **Fecha** | **Referencia** |\n| --- | --- | --- | --- |"
+    }
+  ]
+}

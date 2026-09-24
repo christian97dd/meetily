@@ -1,0 +1,28 @@
+{
+  "name": "Review (ES)",
+  "description": "Review de sprint o demo: qué se mostró, feedback recibido y pendientes. En español.",
+  "sections": [
+    {
+      "title": "Resumen",
+      "instruction": "En español, un párrafo con lo que se presentó y la recepción general.",
+      "format": "paragraph"
+    },
+    {
+      "title": "Qué se mostró",
+      "instruction": "En español, cada funcionalidad o entregable presentado y quién lo presentó.",
+      "format": "list",
+      "item_format": "| **Entregable** | **Presentó** |\n| --- | --- |"
+    },
+    {
+      "title": "Feedback",
+      "instruction": "En español, comentarios, pedidos de cambio o bugs detectados, indicando quién los planteó.",
+      "format": "list"
+    },
+    {
+      "title": "Pendientes",
+      "instruction": "En español, tareas que surgieron de la review con responsable y fecha si se mencionaron.",
+      "format": "list",
+      "item_format": "| **Responsable** | **Tarea** | **Fecha** |\n| --- | --- | --- |"
+    }
+  ]
+}
