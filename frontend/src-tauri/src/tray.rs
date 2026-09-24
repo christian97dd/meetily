@@ -57,61 +57,72 @@ fn toggle_recording_handler<R: Runtime>(app: &AppHandle<R>) {
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
         if crate::is_recording().await {
-            // Immediately show stopping state
-            set_tray_state(&app_clone, RecordingState::Stopping);
-
-            log::info!("Tray toggle: Stopping recording...");
-
-            // Generate save path (same as RecordingControls.tsx)
-            let data_dir = match app_clone.path().app_data_dir() {
-                Ok(dir) => dir,
-                Err(e) => {
-                    log::error!("Failed to get app data dir: {}", e);
-                    update_tray_menu_async(&app_clone).await;
-                    return;
-                }
-            };
-
-            let timestamp = chrono::Local::now().format("%Y-%m-%dT%H-%M-%S").to_string();
-            let save_path = data_dir.join(format!("recording-{}.wav", timestamp));
-
-            // Call Rust stop_recording command (like pause/resume pattern)
-            let stop_result = crate::audio::recording_commands::stop_recording(
-                app_clone.clone(),
-                crate::audio::recording_commands::RecordingArgs {
-                    save_path: save_path.to_string_lossy().to_string(),
-                },
-            )
-            .await;
-
-            // Handle result
-            match stop_result {
-                Ok(_) => {
-                    log::info!("Tray toggle: Recording stopped successfully");
-
-                    // Trigger frontend post-processing via event (works from any page)
-                    // (SQLite save, navigation, analytics)
-                    if let Err(e) = app_clone.emit("recording-stop-complete", true) {
-                        log::error!("Tray toggle: Failed to emit recording-stop-complete event: {}", e);
-                    }
-                }
-                Err(e) => {
-                    log::error!("Tray toggle: Failed to stop recording: {}", e);
-                    // Revert tray state on error
-                    update_tray_menu_async(&app_clone).await;
-                }
-            }
+            stop_recording_and_save(&app_clone, "Tray toggle").await;
         } else {
-            // Immediately show starting state
-            set_tray_state(&app_clone, RecordingState::Starting);
-
-            log::info!("Emitting start recording event from tray");
-            if let Some(window) = app_clone.get_webview_window("main") {
-                let _ = window.eval("sessionStorage.setItem('autoStartRecording', 'true')"); // Set the flag to start recording automatically
-                let _ = window.eval("window.location.assign('/')");
-            }
+            start_recording_via_frontend(&app_clone);
         }
     });
+}
+
+/// Starts recording through the frontend's auto-start flow (same path as the tray button),
+/// so meeting creation, UI state and notifications behave as a manual start.
+pub(crate) fn start_recording_via_frontend<R: Runtime>(app: &AppHandle<R>) {
+    // Immediately show starting state
+    set_tray_state(app, RecordingState::Starting);
+
+    log::info!("Emitting start recording event from tray");
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.eval("sessionStorage.setItem('autoStartRecording', 'true')"); // Set the flag to start recording automatically
+        let _ = window.eval("window.location.assign('/')");
+    }
+}
+
+/// Stops the recording and triggers frontend post-processing (SQLite save, navigation, analytics).
+pub(crate) async fn stop_recording_and_save<R: Runtime>(app: &AppHandle<R>, origin: &str) {
+    // Immediately show stopping state
+    set_tray_state(app, RecordingState::Stopping);
+
+    log::info!("{}: Stopping recording...", origin);
+
+    // Generate save path (same as RecordingControls.tsx)
+    let data_dir = match app.path().app_data_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            log::error!("Failed to get app data dir: {}", e);
+            update_tray_menu_async(app).await;
+            return;
+        }
+    };
+
+    let timestamp = chrono::Local::now().format("%Y-%m-%dT%H-%M-%S").to_string();
+    let save_path = data_dir.join(format!("recording-{}.wav", timestamp));
+
+    // Call Rust stop_recording command (like pause/resume pattern)
+    let stop_result = crate::audio::recording_commands::stop_recording(
+        app.clone(),
+        crate::audio::recording_commands::RecordingArgs {
+            save_path: save_path.to_string_lossy().to_string(),
+        },
+    )
+    .await;
+
+    // Handle result
+    match stop_result {
+        Ok(_) => {
+            log::info!("{}: Recording stopped successfully", origin);
+
+            // Trigger frontend post-processing via event (works from any page)
+            // (SQLite save, navigation, analytics)
+            if let Err(e) = app.emit("recording-stop-complete", true) {
+                log::error!("{}: Failed to emit recording-stop-complete event: {}", origin, e);
+            }
+        }
+        Err(e) => {
+            log::error!("{}: Failed to stop recording: {}", origin, e);
+            // Revert tray state on error
+            update_tray_menu_async(app).await;
+        }
+    }
 }
 
 fn pause_recording_handler<R: Runtime>(app: &AppHandle<R>) {
@@ -150,53 +161,10 @@ fn resume_recording_handler<R: Runtime>(app: &AppHandle<R>) {
 }
 
 fn stop_recording_handler<R: Runtime>(app: &AppHandle<R>) {
-    // Immediately show stopping state
-    set_tray_state(app, RecordingState::Stopping);
-
     focus_main_window(app);
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
-        log::info!("Tray: Stopping recording...");
-
-        // Generate save path (same as RecordingControls.tsx)
-        let data_dir = match app_clone.path().app_data_dir() {
-            Ok(dir) => dir,
-            Err(e) => {
-                log::error!("Failed to get app data dir: {}", e);
-                update_tray_menu_async(&app_clone).await;
-                return;
-            }
-        };
-
-        let timestamp = chrono::Local::now().format("%Y-%m-%dT%H-%M-%S").to_string();
-        let save_path = data_dir.join(format!("recording-{}.wav", timestamp));
-
-        // Call Rust stop_recording command (like pause/resume pattern)
-        let stop_result = crate::audio::recording_commands::stop_recording(
-            app_clone.clone(),
-            crate::audio::recording_commands::RecordingArgs {
-                save_path: save_path.to_string_lossy().to_string(),
-            },
-        )
-        .await;
-
-        // Handle result
-        match stop_result {
-            Ok(_) => {
-                log::info!("Tray: Recording stopped successfully");
-
-                // Trigger frontend post-processing via event (works from any page)
-                // (SQLite save, navigation, analytics)
-                if let Err(e) = app_clone.emit("recording-stop-complete", true) {
-                    log::error!("Tray: Failed to emit recording-stop-complete event: {}", e);
-                }
-            }
-            Err(e) => {
-                log::error!("Tray: Failed to stop recording: {}", e);
-                // Revert tray state on error
-                update_tray_menu_async(&app_clone).await;
-            }
-        }
+        stop_recording_and_save(&app_clone, "Tray").await;
     });
 }
 
@@ -264,7 +232,7 @@ async fn get_current_recording_state() -> RecordingState {
 /// Returns true if:
 /// - Onboarding is complete (user may prefer Whisper later), OR
 /// - Parakeet transcription model is ready (downloaded)
-async fn check_can_record<R: Runtime>(app: &AppHandle<R>) -> bool {
+pub(crate) async fn check_can_record<R: Runtime>(app: &AppHandle<R>) -> bool {
     // First check if onboarding is complete
     let onboarding_complete = match crate::onboarding::load_onboarding_status(app).await {
         Ok(status) => status.completed,
