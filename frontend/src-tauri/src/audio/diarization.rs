@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use log::{info, warn};
-use pyannote_rs::{EmbeddingExtractor, EmbeddingManager};
+use pyannote_rs::EmbeddingExtractor;
 use tauri::{AppHandle, Manager, Runtime};
 
 const MODEL_FILE: &str = "wespeaker_en_voxceleb_CAM++.onnx";
@@ -18,16 +18,73 @@ const MODEL_URL: &str =
 
 /// Below ~1s of speech the embedding is too noisy to trust; such segments inherit the previous speaker.
 const MIN_EMBEDDING_SAMPLES: usize = 16_000;
-/// Cosine similarity needed to reuse a known voice instead of registering a new one.
-const SAME_SPEAKER_SIMILARITY: f32 = 0.5;
+/// Only segments this long may register a new voice; shorter ones join the closest known voice.
+/// Short bursts were splitting one person into several speakers.
+const MIN_NEW_SPEAKER_SAMPLES: usize = 40_000;
+/// Cosine similarity against a voice's running mean needed to reuse it. Call audio is compressed,
+/// so the same person rarely scores as high as on clean recordings.
+const SAME_SPEAKER_SIMILARITY: f32 = 0.4;
 const MAX_SPEAKERS: usize = 10;
+
+/// Known voices of one recording, each kept as the running mean of its (unit-length) embeddings.
+struct SpeakerRegistry {
+    centroids: Vec<(Vec<f32>, u32)>,
+}
+
+impl SpeakerRegistry {
+    fn new() -> Self {
+        Self { centroids: Vec::new() }
+    }
+
+    /// 1-based speaker id for `embedding`. `may_create` allows registering a new voice when none is similar.
+    fn assign(&mut self, embedding: &[f32], may_create: bool) -> Option<usize> {
+        let embedding = normalized(embedding)?;
+        let best = self
+            .centroids
+            .iter()
+            .enumerate()
+            .map(|(index, (centroid, _))| (index, cosine(&embedding, centroid)))
+            .max_by(|(_, a), (_, b)| a.total_cmp(b));
+
+        let index = match best {
+            Some((index, similarity)) if similarity >= SAME_SPEAKER_SIMILARITY => index,
+            _ if may_create && self.centroids.len() < MAX_SPEAKERS => {
+                self.centroids.push((embedding, 1));
+                return Some(self.centroids.len());
+            }
+            // Not allowed to create (short segment or full): the closest voice is the best guess
+            Some((index, _)) => return Some(index + 1),
+            None => return None,
+        };
+
+        let (centroid, count) = &mut self.centroids[index];
+        *count += 1;
+        let weight = 1.0 / *count as f32;
+        for (c, e) in centroid.iter_mut().zip(&embedding) {
+            *c += (e - *c) * weight;
+        }
+        Some(index + 1)
+    }
+}
+
+fn normalized(v: &[f32]) -> Option<Vec<f32>> {
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    (norm > f32::EPSILON).then(|| v.iter().map(|x| x / norm).collect())
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let norm_b = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    // `a` is unit length; centroids drift below it as they average
+    if norm_b > f32::EPSILON { dot / norm_b } else { 0.0 }
+}
 
 static MODEL_PATH: OnceLock<PathBuf> = OnceLock::new();
 static SESSION: Mutex<Option<RecordingDiarizer>> = Mutex::new(None);
 
 struct RecordingDiarizer {
     extractor: EmbeddingExtractor,
-    speakers: EmbeddingManager,
+    speakers: SpeakerRegistry,
     last_speaker: Option<usize>,
 }
 
@@ -46,11 +103,7 @@ impl RecordingDiarizer {
             }
         };
 
-        // search_speaker gives up once MAX_SPEAKERS voices exist; then settle for the closest one
-        let speaker = self
-            .speakers
-            .search_speaker(embedding.clone(), SAME_SPEAKER_SIMILARITY)
-            .or_else(|| self.speakers.get_best_speaker_match(embedding).ok());
+        let speaker = self.speakers.assign(&embedding, samples.len() >= MIN_NEW_SPEAKER_SAMPLES);
         if speaker.is_some() {
             self.last_speaker = speaker;
         }
@@ -101,7 +154,7 @@ pub fn start_session() {
         .and_then(|path| match EmbeddingExtractor::new(path) {
             Ok(extractor) => Some(RecordingDiarizer {
                 extractor,
-                speakers: EmbeddingManager::new(MAX_SPEAKERS),
+                speakers: SpeakerRegistry::new(),
                 last_speaker: None,
             }),
             Err(e) => {
@@ -128,5 +181,58 @@ pub fn system_speaker_key(samples: &[f32]) -> String {
     match speaker {
         Some(id) => format!("system-{}", id),
         None => "system".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn voice(seed: f32, noise: f32) -> Vec<f32> {
+        (0..8).map(|i| ((i as f32 + seed) * 1.7).sin() + noise * ((i as f32 * 3.1).cos())).collect()
+    }
+
+    #[test]
+    fn the_same_voice_with_noise_keeps_one_id() {
+        let mut registry = SpeakerRegistry::new();
+        assert_eq!(registry.assign(&voice(0.0, 0.0), true), Some(1));
+        assert_eq!(registry.assign(&voice(0.0, 0.3), true), Some(1));
+        assert_eq!(registry.assign(&voice(0.0, -0.3), true), Some(1));
+    }
+
+    #[test]
+    fn a_different_voice_gets_a_new_id_when_allowed() {
+        let mut registry = SpeakerRegistry::new();
+        assert_eq!(registry.assign(&voice(0.0, 0.0), true), Some(1));
+        assert_eq!(registry.assign(&[1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0], true), Some(2));
+    }
+
+    #[test]
+    fn short_segments_join_the_closest_voice_instead_of_creating_one() {
+        let mut registry = SpeakerRegistry::new();
+        registry.assign(&voice(0.0, 0.0), true);
+        assert_eq!(registry.assign(&[1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0], false), Some(1));
+        assert_eq!(registry.centroids.len(), 1);
+    }
+
+    #[test]
+    fn nothing_is_assigned_before_any_voice_is_known_unless_creation_is_allowed() {
+        let mut registry = SpeakerRegistry::new();
+        assert_eq!(registry.assign(&voice(0.0, 0.0), false), None);
+        assert_eq!(registry.assign(&[0.0; 8], true), None);
+    }
+
+    #[test]
+    fn stops_creating_voices_at_the_limit() {
+        let mut registry = SpeakerRegistry::new();
+        for i in 0..MAX_SPEAKERS {
+            let mut one_hot = vec![0.0; MAX_SPEAKERS + 1];
+            one_hot[i] = 1.0;
+            assert_eq!(registry.assign(&one_hot, true), Some(i + 1));
+        }
+        let mut extra = vec![0.0; MAX_SPEAKERS + 1];
+        extra[MAX_SPEAKERS] = 1.0;
+        assert!(registry.assign(&extra, true).unwrap() <= MAX_SPEAKERS);
+        assert_eq!(registry.centroids.len(), MAX_SPEAKERS);
     }
 }
