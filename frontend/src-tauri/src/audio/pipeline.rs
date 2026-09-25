@@ -26,6 +26,11 @@ use super::vad::{ContinuousVadProcessor, SpeechSegment};
 /// during continuous speech is tracked separately in #756.
 const VAD_REDEMPTION_TIME_MS: u32 = 500;
 
+/// Live transcription is delivered incrementally during uninterrupted speech.
+/// The target leaves room for a frame to arrive before the hard ceiling.
+const LIVE_SEGMENT_TARGET_MS: u32 = 20_000;
+const LIVE_SEGMENT_HARD_MAX_MS: u32 = 25_000;
+
 /// Ring buffer for synchronized audio mixing
 /// Accumulates samples from mic and system streams until we have aligned windows
 struct AudioMixerRingBuffer {
@@ -870,6 +875,11 @@ impl AudioPipeline {
                                 Err(e) => warn!("⚠️ System VAD error: {}", e),
                             }
 
+                            // Bound uninterrupted live speech while leaving the
+                            // established 500ms redemption policy unchanged.
+                            self.send_bounded_live_segments(DeviceType::Microphone);
+                            self.send_bounded_live_segments(DeviceType::System);
+
                             // STEP 4: Send mixed audio for recording (WAV file)
                             if let Some(ref sender) = self.recording_sender_for_mixed {
                                 let recording_chunk = AudioChunk {
@@ -915,6 +925,23 @@ impl AudioPipeline {
         }
 
         Ok(())
+    }
+
+    fn send_bounded_live_segments(&mut self, device_type: DeviceType) {
+        loop {
+            let vad = match device_type {
+                DeviceType::Microphone => &mut self.mic_vad,
+                DeviceType::System => &mut self.system_vad,
+            };
+            match vad.take_live_segment_if_ready(LIVE_SEGMENT_TARGET_MS, LIVE_SEGMENT_HARD_MAX_MS) {
+                Ok(Some(segment)) => self.send_speech_segments(vec![segment], device_type.clone()),
+                Ok(None) => break,
+                Err(e) => {
+                    warn!("⚠️ Failed to force live {:?} VAD boundary: {}", device_type, e);
+                    break;
+                }
+            }
+        }
     }
 
     fn send_speech_segments(&mut self, segments: Vec<SpeechSegment>, device_type: DeviceType) {
@@ -1096,5 +1123,12 @@ mod tests {
         // uninterrupted speech. Batch import/retranscription use 2000ms.
         // See #679 and #756.
         assert_eq!(VAD_REDEMPTION_TIME_MS, 500);
+    }
+
+    #[test]
+    fn live_segment_bounds_leave_no_unbounded_interval() {
+        assert_eq!(LIVE_SEGMENT_TARGET_MS, 20_000);
+        assert_eq!(LIVE_SEGMENT_HARD_MAX_MS, 25_000);
+        assert!(LIVE_SEGMENT_TARGET_MS <= LIVE_SEGMENT_HARD_MAX_MS);
     }
 }
