@@ -3,7 +3,7 @@
 import { useState, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
-import { Copy, Download, FolderOpen, RefreshCw } from 'lucide-react';
+import { Copy, Download, FolderOpen, RefreshCw, UserSearch } from 'lucide-react';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import type { TranscriptFormat } from '@/lib/transcript-document';
 import Analytics from '@/lib/analytics';
@@ -15,6 +15,8 @@ interface TranscriptButtonGroupProps {
   transcriptCount: number;
   onCopyTranscript: () => void;
   onExportTranscript?: (format: TranscriptFormat) => void;
+  onSuggestSpeakerNames?: () => void;
+  isSuggestingSpeakerNames?: boolean;
   onOpenMeetingFolder: () => Promise<void>;
   meetingId?: string;
   meetingFolderPath?: string | null;
@@ -26,6 +28,8 @@ export function TranscriptButtonGroup({
   transcriptCount,
   onCopyTranscript,
   onExportTranscript,
+  onSuggestSpeakerNames,
+  isSuggestingSpeakerNames = false,
   onOpenMeetingFolder,
   meetingId,
   meetingFolderPath,
@@ -78,6 +82,20 @@ export function TranscriptButtonGroup({
               <DropdownMenuItem onClick={() => onExportTranscript('txt')}>Plain text (.txt)</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+        )}
+
+        {onSuggestSpeakerNames && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="px-2 @[22rem]:px-3"
+            onClick={onSuggestSpeakerNames}
+            disabled={transcriptCount === 0 || isSuggestingSpeakerNames}
+            title="Suggest speaker names from the calendar invitees"
+          >
+            <UserSearch className={isSuggestingSpeakerNames ? 'animate-pulse' : undefined} />
+            <span className="hidden @[22rem]:inline">Names</span>
+          </Button>
         )}
 
         <Button

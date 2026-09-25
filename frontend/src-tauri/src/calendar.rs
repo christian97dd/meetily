@@ -9,6 +9,13 @@ use tauri_plugin_store::StoreExt;
 const STORE_FILE: &str = "calendar.json";
 const STORE_KEY: &str = "settings";
 
+/// People invited to a calendar event. `me` is the invitee marked as the current macOS user.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct EventAttendees {
+    pub me: Option<String>,
+    pub others: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct CalendarNamingSettings {
     pub enabled: bool,
@@ -35,8 +42,10 @@ mod eventkit {
 
     use block2::RcBlock;
     use objc2::runtime::Bool;
-    use objc2_event_kit::{EKAuthorizationStatus, EKEntityType, EKEventStore};
+    use objc2_event_kit::{EKAuthorizationStatus, EKEntityType, EKEventStore, EKParticipantType};
     use objc2_foundation::{NSDate, NSError};
+
+    use super::EventAttendees;
 
     /// Events that started up to this long ago are still candidates (long meetings).
     const LOOKBACK_SECS: f64 = 3.0 * 3600.0;
@@ -86,6 +95,51 @@ mod eventkit {
                 .map(|(_, title)| title.trim().to_string())
         }
     }
+
+    /// Invitees of the non all-day event overlapping [start, end] (unix seconds) the most.
+    pub fn attendees_between(start_unix: f64, end_unix: f64) -> Option<EventAttendees> {
+        if !has_access() || end_unix <= start_unix {
+            return None;
+        }
+        unsafe {
+            let store = EKEventStore::new();
+            let from = NSDate::dateWithTimeIntervalSince1970(start_unix);
+            let to = NSDate::dateWithTimeIntervalSince1970(end_unix);
+            let predicate = store.predicateForEventsWithStartDate_endDate_calendars(&from, &to, None);
+
+            let event = store
+                .eventsMatchingPredicate(&predicate)
+                .iter()
+                .filter(|event| !event.isAllDay())
+                .map(|event| {
+                    let overlap = event.endDate().timeIntervalSince1970().min(end_unix)
+                        - event.startDate().timeIntervalSince1970().max(start_unix);
+                    (overlap, event)
+                })
+                .filter(|(overlap, _)| *overlap > 0.0)
+                .max_by(|(a, _), (b, _)| a.total_cmp(b))
+                .map(|(_, event)| event)?;
+
+            let mut attendees = EventAttendees::default();
+            for participant in event.attendees()?.iter() {
+                if participant.participantType() != EKParticipantType::Person {
+                    continue;
+                }
+                let Some(name) = participant.name().map(|n| n.to_string().trim().to_string()) else {
+                    continue;
+                };
+                if name.is_empty() {
+                    continue;
+                }
+                if participant.isCurrentUser() {
+                    attendees.me = Some(name);
+                } else if !attendees.others.contains(&name) {
+                    attendees.others.push(name);
+                }
+            }
+            Some(attendees)
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -99,6 +153,20 @@ mod eventkit {
     pub fn current_event_title() -> Option<String> {
         None
     }
+    pub fn attendees_between(_start_unix: f64, _end_unix: f64) -> Option<super::EventAttendees> {
+        None
+    }
+}
+
+/// Invitees of the calendar event that overlapped a meeting, when calendar naming is enabled.
+pub async fn attendees_between<R: Runtime>(app: &AppHandle<R>, start_unix: f64, end_unix: f64) -> Option<EventAttendees> {
+    if !load_settings(app).enabled {
+        return None;
+    }
+    tokio::task::spawn_blocking(move || eventkit::attendees_between(start_unix, end_unix))
+        .await
+        .ok()
+        .flatten()
 }
 
 #[tauri::command]

@@ -176,7 +176,7 @@ cidre = { git = "https://github.com/yury/cidre", rev = "a9587fa", features = ["a
 objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDate", "NSEnumerator", "NSError", "NSString"] }
-objc2-event-kit = { version = "0.3", default-features = false, features = ["std", "block2", "EKCalendar", "EKCalendarItem", "EKEvent", "EKEventStore", "EKObject", "EKTypes"] }
+objc2-event-kit = { version = "0.3", default-features = false, features = ["std", "block2", "EKCalendar", "EKCalendarItem", "EKEvent", "EKEventStore", "EKObject", "EKParticipant", "EKTypes"] }
 dasp = "0.11.0"
 futures-channel = "0.3.31"
 

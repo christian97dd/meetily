@@ -8,6 +8,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { fetchSpeakerNames, saveSpeakerName, SpeakerNames, speakerLabel } from '@/lib/speaker';
 import { SpeakerRenameDialog } from './SpeakerRenameDialog';
+import { SpeakerNameSuggestions, SpeakerSuggestionsDialog } from './SpeakerSuggestionsDialog';
+import { invoke } from '@tauri-apps/api/core';
 import type { TranscriptFormat } from '@/lib/transcript-document';
 
 interface TranscriptPanelProps {
@@ -79,6 +81,35 @@ export function TranscriptPanel({
     fetchSpeakerNames(meetingId).then(setSpeakerNames);
   }, [meetingId]);
 
+  const [suggestions, setSuggestions] = useState<SpeakerNameSuggestions | null>(null);
+  const [isSuggesting, setIsSuggesting] = useState(false);
+
+  const handleSuggestSpeakerNames = useCallback(async () => {
+    if (!meetingId) return;
+    setIsSuggesting(true);
+    try {
+      setSuggestions(await invoke<SpeakerNameSuggestions>('api_suggest_speaker_names', { meetingId }));
+    } catch (error) {
+      console.error('Failed to suggest speaker names:', error);
+      toast.error('Failed to suggest speaker names', { description: String(error) });
+    } finally {
+      setIsSuggesting(false);
+    }
+  }, [meetingId]);
+
+  const handleApplySuggestions = useCallback(async (accepted: SpeakerNames) => {
+    if (!meetingId) return;
+    try {
+      for (const [speaker, name] of Object.entries(accepted)) {
+        await saveSpeakerName(meetingId, speaker, name);
+      }
+      setSpeakerNames(await fetchSpeakerNames(meetingId));
+    } catch (error) {
+      console.error('Failed to apply speaker names:', error);
+      toast.error('Failed to apply speaker names');
+    }
+  }, [meetingId]);
+
   const handleSaveSpeakerName = useCallback(async (name: string) => {
     if (!meetingId || !renamingSpeaker) return;
     try {
@@ -98,6 +129,8 @@ export function TranscriptPanel({
           transcriptCount={usePagination ? (totalCount ?? convertedSegments.length) : (transcripts?.length || 0)}
           onCopyTranscript={onCopyTranscript}
           onExportTranscript={onExportTranscript}
+          onSuggestSpeakerNames={meetingId && !isRecording ? handleSuggestSpeakerNames : undefined}
+          isSuggestingSpeakerNames={isSuggesting}
           onOpenMeetingFolder={onOpenMeetingFolder}
           meetingId={meetingId}
           meetingFolderPath={meetingFolderPath}
@@ -130,6 +163,13 @@ export function TranscriptPanel({
         currentLabel={renamingSpeaker ? speakerLabel(renamingSpeaker, speakerNames) : null}
         onClose={() => setRenamingSpeaker(null)}
         onSave={handleSaveSpeakerName}
+      />
+
+      <SpeakerSuggestionsDialog
+        suggestions={suggestions}
+        currentNames={speakerNames}
+        onClose={() => setSuggestions(null)}
+        onApply={handleApplySuggestions}
       />
 
       {/* Custom prompt input at bottom of transcript section */}

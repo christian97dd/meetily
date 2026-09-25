@@ -726,6 +726,7 @@ pub fn run() {
             api::api_search_transcripts,
             api::api_get_meeting_speakers,
             api::api_set_meeting_speaker,
+            summary::speaker_names::api_suggest_speaker_names,
             api::api_get_profile,
             api::api_save_profile,
             api::api_update_profile,
