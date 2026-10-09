@@ -3,6 +3,7 @@
 import { useEffect, useState, useRef } from "react"
 import { Switch } from "./ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select"
+import { Textarea } from "./ui/textarea"
 import { FolderOpen } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
 import Analytics from "@/lib/analytics"
@@ -237,6 +238,50 @@ function AutoRetranscriptionSettingsRow() {
   );
 }
 
+function VocabularySettings() {
+  const [terms, setTerms] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string>('');
+
+  useEffect(() => {
+    invoke<{ terms: string }>('get_vocabulary_settings')
+      .then(({ terms }) => {
+        setTerms(terms);
+        setSaved(terms);
+      })
+      .catch((error) => {
+        console.error('Failed to load vocabulary:', error);
+        setTerms('');
+      });
+  }, []);
+
+  const handleBlur = async () => {
+    if (terms === null || terms === saved) return;
+    try {
+      await invoke('set_vocabulary_settings', { settings: { terms } });
+      setSaved(terms);
+    } catch (error) {
+      console.error('Failed to save vocabulary:', error);
+    }
+  };
+
+  return (
+    <div>
+      <h3 className="text-lg font-semibold text-foreground mb-2">Vocabulary</h3>
+      <p className="text-sm text-muted-foreground mb-3">
+        Names and terms Whisper should spell correctly, separated by commas or lines (e.g. product names, team jargon, people's names). Keep it short: only the first ~500 characters are used. Whisper only; Parakeet ignores it.
+      </p>
+      <Textarea
+        value={terms ?? ''}
+        disabled={terms === null}
+        onChange={(e) => setTerms(e.target.value)}
+        onBlur={handleBlur}
+        rows={3}
+        placeholder="Acme, Kubernetes, OKR"
+      />
+    </div>
+  );
+}
+
 export function PreferenceSettings() {
   const {
     notificationSettings,
@@ -406,6 +451,10 @@ export function PreferenceSettings() {
 
       <div className="bg-background rounded-lg border border-border p-6 shadow-sm">
         <AutoRetranscriptionSettingsRow />
+      </div>
+
+      <div className="bg-background rounded-lg border border-border p-6 shadow-sm">
+        <VocabularySettings />
       </div>
 
       {/* Data Storage Locations Section */}

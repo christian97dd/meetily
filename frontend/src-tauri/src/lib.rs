@@ -56,6 +56,7 @@ pub mod state;
 pub mod summary;
 pub mod tray;
 pub mod utils;
+pub mod vocabulary;
 pub mod whisper_engine;
 
 use audio::{list_audio_devices, AudioDevice, trigger_audio_permission};
@@ -553,6 +554,8 @@ pub fn run() {
                 }
             });
 
+            vocabulary::init(_app.handle());
+
             // Voice embedding model for telling remote speakers apart
             audio::diarization::init(_app.handle());
 
@@ -727,10 +730,12 @@ pub fn run() {
             api::api_get_meeting_speakers,
             api::api_set_meeting_speaker,
             summary::speaker_names::api_suggest_speaker_names,
-            summary::speaker_names::get_speaker_naming_settings,
-            summary::speaker_names::set_speaker_naming_settings,
+            vocabulary::get_vocabulary_settings,
             audio::retranscription::get_auto_retranscription_settings,
             audio::retranscription::set_auto_retranscription_settings,
+            vocabulary::set_vocabulary_settings,
+            summary::speaker_names::get_speaker_naming_settings,
+            summary::speaker_names::set_speaker_naming_settings,
             api::api_get_profile,
             api::api_save_profile,
             api::api_update_profile,
