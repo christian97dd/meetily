@@ -123,25 +123,56 @@ impl TranscriptsRepository {
 
     /// Helper function to extract a snippet of text around the first match of a query.
     fn get_match_context(transcript: &str, query: &str) -> String {
-        let transcript_lower = transcript.to_lowercase();
-        let query_lower = query.to_lowercase();
+        // Work in chars, not bytes: slicing ±100 bytes split multibyte characters (á, ñ, ¿) and
+        // panicked. Matching on the original chars also avoids offsets drifting when lowercasing
+        // changes a character's length.
+        const CONTEXT_CHARS: usize = 100;
+        let chars: Vec<char> = transcript.chars().collect();
+        let needle: Vec<char> = query.chars().collect();
+        let same = |a: &char, b: &char| a.to_lowercase().eq(b.to_lowercase());
 
-        match transcript_lower.find(&query_lower) {
+        let found = (!needle.is_empty() && needle.len() <= chars.len())
+            .then(|| (0..=chars.len() - needle.len()).find(|&i| chars[i..i + needle.len()].iter().zip(&needle).all(|(a, b)| same(a, b))))
+            .flatten();
+
+        match found {
             Some(match_index) => {
-                let start_index = match_index.saturating_sub(100);
-                let end_index = (match_index + query.len() + 100).min(transcript.len());
+                let start_index = match_index.saturating_sub(CONTEXT_CHARS);
+                let end_index = (match_index + needle.len() + CONTEXT_CHARS).min(chars.len());
 
                 let mut context = String::new();
                 if start_index > 0 {
                     context.push_str("...");
                 }
-                context.push_str(&transcript[start_index..end_index]);
-                if end_index < transcript.len() {
+                context.extend(&chars[start_index..end_index]);
+                if end_index < chars.len() {
                     context.push_str("...");
                 }
                 context
             }
-            None => transcript.chars().take(200).collect(), // Fallback to the start of the transcript
+            None => chars.iter().take(200).collect(), // Fallback to the start of the transcript
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TranscriptsRepository;
+
+    #[test]
+    fn match_context_handles_multibyte_characters_near_the_cut() {
+        // 'ñ' takes bytes 99-100 and the match starts at byte 200, so a 100-byte window
+        // before it would start at byte 100, in the middle of the 'ñ'
+        let transcript = format!("{}ñ{}palabra{}", "a".repeat(99), "b".repeat(99), "c".repeat(150));
+        assert_eq!(transcript.find("palabra"), Some(200));
+        let context = TranscriptsRepository::get_match_context(&transcript, "palabra");
+        assert!(context.contains("palabra"));
+    }
+
+    #[test]
+    fn match_context_is_case_insensitive_with_accents() {
+        let transcript = "¿Cómo andás? Hablamos del MOVIMIENTO de pedidos.";
+        assert!(TranscriptsRepository::get_match_context(transcript, "movimiento").contains("MOVIMIENTO"));
+        assert!(TranscriptsRepository::get_match_context(transcript, "cómo").contains("Cómo"));
     }
 }
