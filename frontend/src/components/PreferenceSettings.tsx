@@ -133,6 +133,47 @@ function CalendarNamingSwitch() {
   );
 }
 
+function AutoSpeakerNamingSwitch() {
+  const [autoApply, setAutoApply] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    invoke<{ auto_apply: boolean }>('get_speaker_naming_settings')
+      .then((settings) => setAutoApply(settings.auto_apply))
+      .catch((error) => {
+        console.error('Failed to load speaker naming settings:', error);
+        setAutoApply(false);
+      });
+  }, []);
+
+  const handleChange = async (next: boolean) => {
+    const previous = autoApply;
+    setAutoApply(next);
+    try {
+      await invoke('set_speaker_naming_settings', { settings: { auto_apply: next } });
+    } catch (error) {
+      console.error('Failed to save speaker naming settings:', error);
+      setAutoApply(previous);
+    }
+  };
+
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <div>
+        <h3 className="text-lg font-semibold text-foreground mb-2">Name speakers automatically</h3>
+        <p className="text-sm text-muted-foreground">
+          When a recording is saved, applies the suggested names from the calendar invitees without asking. Needs &quot;Name meetings from calendar&quot;.
+        </p>
+        {autoApply && (
+          <p className="text-sm text-amber-700 dark:text-amber-300 mt-2">
+            Suggestions can be wrong and are applied without review. Check the names and rename any speaker that doesn&apos;t match.
+          </p>
+        )}
+      </div>
+      <Switch checked={autoApply ?? false} disabled={autoApply === null} onCheckedChange={handleChange} />
+    </div>
+  );
+}
+
 export function PreferenceSettings() {
   const {
     notificationSettings,
@@ -294,6 +335,10 @@ export function PreferenceSettings() {
 
       <div className="bg-background rounded-lg border border-border p-6 shadow-sm">
         <CalendarNamingSwitch />
+      </div>
+
+      <div className="bg-background rounded-lg border border-border p-6 shadow-sm">
+        <AutoSpeakerNamingSwitch />
       </div>
 
       {/* Data Storage Locations Section */}

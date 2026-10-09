@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { SpeakerNames, speakerLabel } from '@/lib/speaker';
@@ -8,6 +9,7 @@ import { SpeakerNames, speakerLabel } from '@/lib/speaker';
 export interface SpeakerNameSuggestions {
   names: SpeakerNames;
   attendees: string[];
+  calendar_enabled: boolean;
 }
 
 interface SpeakerSuggestionsDialogProps {
@@ -21,6 +23,7 @@ interface SpeakerSuggestionsDialogProps {
 export function SpeakerSuggestionsDialog({ suggestions, currentNames, onClose, onApply }: SpeakerSuggestionsDialogProps) {
   const [accepted, setAccepted] = useState<Record<string, boolean>>({});
   const [isSaving, setIsSaving] = useState(false);
+  const router = useRouter();
   const entries = Object.entries(suggestions?.names ?? {}).sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
 
   useEffect(() => {
@@ -37,13 +40,28 @@ export function SpeakerSuggestionsDialog({ suggestions, currentNames, onClose, o
     }
   };
 
+  const openPreferences = () => {
+    onClose();
+    // Preferences is the default Settings tab
+    router.push('/settings');
+  };
+
   const description = !suggestions
     ? ''
-    : suggestions.attendees.length === 0
-      ? 'No calendar event with invitees was found for this meeting. Enable "Name meetings from calendar" in Preferences.'
-      : entries.length === 0
-        ? `Invitees: ${suggestions.attendees.join(', ')}. Nobody was addressed by name clearly enough to match them.`
-        : `Matched from the calendar invitees and how people address each other. Review before applying.`;
+    : !suggestions.calendar_enabled
+      ? (
+        <>
+          Names come from the meeting&apos;s calendar invitees.{' '}
+          <button type="button" className="text-blue-600 dark:text-blue-400 underline" onClick={openPreferences}>
+            Enable &quot;Name meetings from calendar&quot; in Preferences
+          </button>
+        </>
+      )
+      : suggestions.attendees.length === 0
+        ? 'No calendar event with invitees overlapped this meeting.'
+        : entries.length === 0
+          ? `Invitees: ${suggestions.attendees.join(', ')}. Nobody was addressed by name clearly enough to match them.`
+          : `Matched from the calendar invitees and how people address each other. Review before applying.`;
 
   return (
     <Dialog open={suggestions !== null} onOpenChange={(open) => !open && onClose()}>

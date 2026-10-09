@@ -158,6 +158,11 @@ mod eventkit {
     }
 }
 
+/// Whether the user enabled calendar naming and macOS still grants calendar access.
+pub fn naming_enabled<R: Runtime>(app: &AppHandle<R>) -> bool {
+    load_settings(app).enabled && eventkit::has_access()
+}
+
 /// Invitees of the calendar event that overlapped a meeting, when calendar naming is enabled.
 pub async fn attendees_between<R: Runtime>(app: &AppHandle<R>, start_unix: f64, end_unix: f64) -> Option<EventAttendees> {
     if !load_settings(app).enabled {

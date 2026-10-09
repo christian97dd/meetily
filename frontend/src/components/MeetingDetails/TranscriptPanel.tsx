@@ -10,6 +10,7 @@ import { fetchSpeakerNames, saveSpeakerName, SpeakerNames, speakerLabel } from '
 import { SpeakerRenameDialog } from './SpeakerRenameDialog';
 import { SpeakerNameSuggestions, SpeakerSuggestionsDialog } from './SpeakerSuggestionsDialog';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import type { TranscriptFormat } from '@/lib/transcript-document';
 
 interface TranscriptPanelProps {
@@ -79,6 +80,13 @@ export function TranscriptPanel({
   useEffect(() => {
     if (!meetingId) return;
     fetchSpeakerNames(meetingId).then(setSpeakerNames);
+    // Automatic naming runs in the background after a recording is saved
+    const unlisten = listen<string>('speaker-names-updated', (event) => {
+      if (event.payload === meetingId) fetchSpeakerNames(meetingId).then(setSpeakerNames);
+    });
+    return () => {
+      unlisten.then(fn => fn());
+    };
   }, [meetingId]);
 
   const [suggestions, setSuggestions] = useState<SpeakerNameSuggestions | null>(null);

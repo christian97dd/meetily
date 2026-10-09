@@ -7,10 +7,15 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use serde::Serialize;
-use tauri::{AppHandle, Manager, Runtime};
+use log::{info, warn};
+use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
+use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri_plugin_store::StoreExt;
 
-use crate::database::repositories::{meeting::MeetingsRepository, setting::SettingsRepository};
+use crate::database::repositories::{
+    meeting::MeetingsRepository, setting::SettingsRepository, speaker::SpeakersRepository,
+};
 use crate::database::models::Transcript;
 use crate::state::AppState;
 use crate::summary::llm_client::{generate_summary, LLMProvider};
@@ -21,6 +26,9 @@ const CONTEXT_LINES: usize = 2;
 const MAX_PROMPT_LINES: usize = 80;
 /// The calendar event may have started a bit before the recording or ended after it.
 const CALENDAR_SLACK_SECS: f64 = 10.0 * 60.0;
+
+const STORE_FILE: &str = "speaker-names.json";
+const STORE_KEY: &str = "settings";
 
 const SYSTEM_PROMPT: &str = "You match meeting speakers to people. Speakers are labeled like system-1, system-2. \
 Use only how people address or refer to each other in the transcript. \
@@ -33,6 +41,22 @@ pub struct SpeakerNameSuggestions {
     pub names: HashMap<String, String>,
     /// Invitees found in the calendar; empty when calendar naming is off or no event matched.
     pub attendees: Vec<String>,
+    /// Lets the UI tell "calendar naming is off" apart from "no event matched".
+    pub calendar_enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SpeakerNamingSettings {
+    /// Apply suggestions automatically when a recording is saved, without review.
+    pub auto_apply: bool,
+}
+
+fn load_settings<R: Runtime>(app: &AppHandle<R>) -> SpeakerNamingSettings {
+    app.store(STORE_FILE)
+        .ok()
+        .and_then(|store| store.get(STORE_KEY))
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
 }
 
 struct Line<'a> {
@@ -160,20 +184,18 @@ async fn resolve_llm(pool: &sqlx::SqlitePool) -> Result<ResolvedLlm, String> {
     Ok(resolved)
 }
 
-#[tauri::command]
-pub async fn api_suggest_speaker_names<R: Runtime>(
-    app: AppHandle<R>,
-    state: tauri::State<'_, AppState>,
-    meeting_id: String,
+async fn suggest<R: Runtime>(
+    app: &AppHandle<R>,
+    pool: &SqlitePool,
+    meeting_id: &str,
 ) -> Result<SpeakerNameSuggestions, String> {
-    let pool = state.db_manager.pool();
-
-    let meeting = MeetingsRepository::get_meeting_metadata(pool, &meeting_id)
+    let calendar_enabled = crate::calendar::naming_enabled(app);
+    let meeting = MeetingsRepository::get_meeting_metadata(pool, meeting_id)
         .await
         .map_err(|e| format!("Failed to load meeting: {}", e))?
         .ok_or("Meeting not found")?;
     let (transcripts, _): (Vec<Transcript>, i64) =
-        MeetingsRepository::get_meeting_transcripts_paginated(pool, &meeting_id, i64::MAX, 0)
+        MeetingsRepository::get_meeting_transcripts_paginated(pool, meeting_id, i64::MAX, 0)
             .await
             .map_err(|e| format!("Failed to load transcripts: {}", e))?;
 
@@ -181,7 +203,7 @@ pub async fn api_suggest_speaker_names<R: Runtime>(
     let end = meeting.created_at.0.timestamp() as f64;
     let duration = transcripts.iter().filter_map(|t| t.audio_end_time).fold(0.0, f64::max);
     let attendees = crate::calendar::attendees_between(
-        &app,
+        app,
         end - duration - CALENDAR_SLACK_SECS,
         end + CALENDAR_SLACK_SECS,
     )
@@ -231,7 +253,61 @@ pub async fn api_suggest_speaker_names<R: Runtime>(
     if let Some(me) = attendees.me {
         all_attendees.insert(0, me);
     }
-    Ok(SpeakerNameSuggestions { names, attendees: all_attendees })
+    Ok(SpeakerNameSuggestions { names, attendees: all_attendees, calendar_enabled })
+}
+
+#[tauri::command]
+pub async fn api_suggest_speaker_names<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+) -> Result<SpeakerNameSuggestions, String> {
+    suggest(&app, state.db_manager.pool(), &meeting_id).await
+}
+
+/// After a recording is saved, names its speakers without review when the user opted in.
+/// Speakers the user already named are left alone.
+pub fn auto_apply_in_background<R: Runtime>(app: &AppHandle<R>, pool: SqlitePool, meeting_id: String) {
+    if !load_settings(app).auto_apply {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let suggestions = match suggest(&app, &pool, &meeting_id).await {
+            Ok(suggestions) => suggestions,
+            Err(e) => {
+                warn!("Auto speaker naming failed for {}: {}", meeting_id, e);
+                return;
+            }
+        };
+        let existing = SpeakersRepository::get_names(&pool, &meeting_id).await.unwrap_or_default();
+        let mut applied = 0;
+        for (speaker, name) in suggestions.names.iter().filter(|(speaker, _)| !existing.contains_key(*speaker)) {
+            match SpeakersRepository::set_name(&pool, &meeting_id, speaker, name).await {
+                Ok(()) => applied += 1,
+                Err(e) => warn!("Auto speaker naming: failed to save {}: {}", speaker, e),
+            }
+        }
+        info!("Auto speaker naming: applied {} name(s) to {}", applied, meeting_id);
+        if applied > 0 {
+            let _ = app.emit("speaker-names-updated", &meeting_id);
+        }
+    });
+}
+
+#[tauri::command]
+pub async fn get_speaker_naming_settings<R: Runtime>(app: AppHandle<R>) -> Result<SpeakerNamingSettings, String> {
+    Ok(load_settings(&app))
+}
+
+#[tauri::command]
+pub async fn set_speaker_naming_settings<R: Runtime>(
+    app: AppHandle<R>,
+    settings: SpeakerNamingSettings,
+) -> Result<(), String> {
+    let store = app.store(STORE_FILE).map_err(|e| format!("Failed to access speaker naming store: {}", e))?;
+    store.set(STORE_KEY, serde_json::to_value(&settings).map_err(|e| e.to_string())?);
+    store.save().map_err(|e| format!("Failed to save speaker naming settings: {}", e))
 }
 
 #[cfg(test)]
