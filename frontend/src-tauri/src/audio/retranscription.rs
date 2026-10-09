@@ -11,6 +11,7 @@ use crate::whisper_engine::WhisperEngine;
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -400,6 +401,43 @@ async fn transcribe_source<R: Runtime>(
     Ok((transcripts, duration_seconds))
 }
 
+/// A new speaker must share at least this much speech time with an old one to inherit its name.
+const MIN_SPEAKER_OVERLAP_SECS: f64 = 3.0;
+/// Share of both speakers' overlapping time the match must hold, so a voice that was split in two
+/// or two voices that were merged into one don't inherit a name that may belong to someone else.
+const MIN_SPEAKER_OVERLAP_SHARE: f64 = 0.6;
+
+/// Pairs each new remote speaker with the old one whose turns it clearly took over, comparing who
+/// spoke when in both transcripts. Turns are (speaker, start, end) in seconds; returns new -> old.
+fn match_speakers_by_overlap(old: &[(String, f64, f64)], new: &[(String, f64, f64)]) -> HashMap<String, String> {
+    let mut overlap: HashMap<(&str, &str), f64> = HashMap::new();
+    for (new_key, new_start, new_end) in new.iter().filter(|(key, _, _)| key.starts_with("system-")) {
+        for (old_key, old_start, old_end) in old.iter().filter(|(key, _, _)| key.starts_with("system-")) {
+            let shared = new_end.min(*old_end) - new_start.max(*old_start);
+            if shared > 0.0 {
+                *overlap.entry((new_key.as_str(), old_key.as_str())).or_default() += shared;
+            }
+        }
+    }
+
+    let mut total_new: HashMap<&str, f64> = HashMap::new();
+    let mut total_old: HashMap<&str, f64> = HashMap::new();
+    for (&(new_key, old_key), &secs) in &overlap {
+        *total_new.entry(new_key).or_default() += secs;
+        *total_old.entry(old_key).or_default() += secs;
+    }
+
+    overlap
+        .iter()
+        .filter(|(&(new_key, old_key), &secs)| {
+            secs >= MIN_SPEAKER_OVERLAP_SECS
+                && secs / total_new[new_key] >= MIN_SPEAKER_OVERLAP_SHARE
+                && secs / total_old[old_key] >= MIN_SPEAKER_OVERLAP_SHARE
+        })
+        .map(|(&(new_key, old_key), _)| (new_key.to_string(), old_key.to_string()))
+        .collect()
+}
+
 /// Internal function to run retranscription
 async fn run_retranscription<R: Runtime>(
     app: AppHandle<R>,
@@ -491,6 +529,30 @@ async fn run_retranscription<R: Runtime>(
         .await
         .map_err(|e| anyhow!("Failed to start transaction: {}", e))?;
 
+    // Remote voices get renumbered by the new diarization; capture who spoke when, and their names,
+    // before the old transcript is replaced so the names can be carried over.
+    let (previous_turns, previous_names) = if tracks.is_some() {
+        let turns: Vec<(String, f64, f64)> = sqlx::query_as(
+            "SELECT speaker, audio_start_time, audio_end_time FROM transcripts
+             WHERE meeting_id = ? AND speaker LIKE 'system-%' AND audio_start_time IS NOT NULL AND audio_end_time IS NOT NULL",
+        )
+        .bind(&meeting_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| anyhow!("Failed to read previous speakers: {}", e))?;
+        let names: HashMap<String, String> =
+            sqlx::query_as::<_, (String, String)>("SELECT speaker_key, name FROM meeting_speakers WHERE meeting_id = ?")
+                .bind(&meeting_id)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|e| anyhow!("Failed to read previous speaker names: {}", e))?
+                .into_iter()
+                .collect();
+        (turns, names)
+    } else {
+        (Vec::new(), HashMap::new())
+    };
+
     sqlx::query("DELETE FROM transcripts WHERE meeting_id = ?")
         .bind(&meeting_id)
         .execute(&mut *tx)
@@ -516,13 +578,28 @@ async fn run_retranscription<R: Runtime>(
     }
 
     if tracks.is_some() {
-        // Re-diarizing renumbers remote voices, so names given to the old numbers no longer apply.
-        // The local user ('mic') is the same person in both runs.
+        // Names belong to the old numbering. The local user ('mic') is the same person in both runs;
+        // remote names move to whichever new speaker clearly took over the old one's turns.
         sqlx::query("DELETE FROM meeting_speakers WHERE meeting_id = ? AND speaker_key != 'mic'")
             .bind(&meeting_id)
             .execute(&mut *tx)
             .await
             .map_err(|e| anyhow!("Failed to reset speaker names: {}", e))?;
+
+        let new_turns: Vec<(String, f64, f64)> = segments
+            .iter()
+            .filter_map(|s| Some((s.speaker.clone()?, s.audio_start_time?, s.audio_end_time?)))
+            .collect();
+        for (new_key, old_key) in match_speakers_by_overlap(&previous_turns, &new_turns) {
+            let Some(name) = previous_names.get(&old_key) else { continue };
+            sqlx::query("INSERT INTO meeting_speakers (meeting_id, speaker_key, name) VALUES (?, ?, ?)")
+                .bind(&meeting_id)
+                .bind(&new_key)
+                .bind(name)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| anyhow!("Failed to carry over speaker name: {}", e))?;
+        }
     }
 
     tx.commit().await
@@ -909,6 +986,41 @@ pub async fn is_retranscription_in_progress_command() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn turns(list: &[(&str, f64, f64)]) -> Vec<(String, f64, f64)> {
+        list.iter().map(|(k, s, e)| (k.to_string(), *s, *e)).collect()
+    }
+
+    #[test]
+    fn renumbered_speakers_inherit_from_the_old_speaker_they_replace() {
+        let old = turns(&[("system-1", 0.0, 10.0), ("system-3", 10.0, 20.0), ("system-1", 20.0, 30.0)]);
+        let new = turns(&[("system-2", 0.0, 10.0), ("system-1", 10.0, 20.0), ("system-2", 20.0, 31.0)]);
+        let matched = match_speakers_by_overlap(&old, &new);
+        assert_eq!(matched.len(), 2);
+        assert_eq!(matched["system-2"], "system-1");
+        assert_eq!(matched["system-1"], "system-3");
+    }
+
+    #[test]
+    fn a_voice_split_in_two_does_not_pass_its_name_on() {
+        let old = turns(&[("system-1", 0.0, 20.0)]);
+        let new = turns(&[("system-1", 0.0, 10.0), ("system-2", 10.0, 20.0)]);
+        assert!(match_speakers_by_overlap(&old, &new).is_empty());
+    }
+
+    #[test]
+    fn two_voices_merged_into_one_do_not_pass_a_name_on() {
+        let old = turns(&[("system-1", 0.0, 10.0), ("system-2", 10.0, 20.0)]);
+        let new = turns(&[("system-1", 0.0, 20.0)]);
+        assert!(match_speakers_by_overlap(&old, &new).is_empty());
+    }
+
+    #[test]
+    fn brief_overlaps_and_non_remote_speakers_are_ignored() {
+        let old = turns(&[("system-1", 0.0, 2.0), ("mic", 2.0, 30.0)]);
+        let new = turns(&[("system-1", 0.0, 2.0), ("mic", 2.0, 30.0)]);
+        assert!(match_speakers_by_overlap(&old, &new).is_empty());
+    }
 
     #[test]
     fn test_create_transcript_segments_empty() {
