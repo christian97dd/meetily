@@ -4,7 +4,7 @@ import { useEffect, useState, useRef } from "react"
 import { Switch } from "./ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select"
 import { Textarea } from "./ui/textarea"
-import { FolderOpen } from "lucide-react"
+import { Copy, FolderOpen, RefreshCw } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
 import Analytics from "@/lib/analytics"
 import AnalyticsConsentSwitch from "./AnalyticsConsentSwitch"
@@ -282,6 +282,94 @@ function VocabularySettings() {
   );
 }
 
+interface LocalApiSettings {
+  enabled: boolean;
+  allow_content: boolean;
+  port: number;
+  token: string;
+}
+
+function LocalApiSettingsSection() {
+  const [settings, setSettings] = useState<LocalApiSettings | null>(null);
+
+  useEffect(() => {
+    invoke<LocalApiSettings>('get_local_api_settings')
+      .then(setSettings)
+      .catch((error) => console.error('Failed to load local API settings:', error));
+  }, []);
+
+  const update = async (enabled: boolean, allowContent: boolean, regenerateToken = false) => {
+    try {
+      setSettings(await invoke<LocalApiSettings>('set_local_api_settings', {
+        update: { enabled, allow_content: allowContent, regenerate_token: regenerateToken },
+      }));
+    } catch (error) {
+      console.error('Failed to save local API settings:', error);
+    }
+  };
+
+  if (!settings) return null;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <h3 className="text-lg font-semibold text-foreground mb-2">Local API</h3>
+          <p className="text-sm text-muted-foreground">
+            Lets tools on this Mac (an MCP server, scripts) list meetings, summarize, export and control recording. Only reachable from this computer and only with the token below.
+          </p>
+        </div>
+        <Switch checked={settings.enabled} onCheckedChange={(enabled) => update(enabled, settings.allow_content)} />
+      </div>
+
+      {settings.enabled && (
+        <>
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <div className="font-medium text-foreground">Allow reading meeting content</div>
+              <p className="text-sm text-muted-foreground">
+                Transcripts, summaries and search results. Off, clients can still trigger summaries and exports but never receive what was said.
+              </p>
+              {settings.allow_content && (
+                <p className="text-sm text-amber-700 dark:text-amber-300 mt-2">
+                  Anything with the token can read your meetings. If the client is an AI assistant, the content goes to its provider.
+                </p>
+              )}
+            </div>
+            <Switch checked={settings.allow_content} onCheckedChange={(allow) => update(settings.enabled, allow)} />
+          </div>
+
+          <div className="p-3 border border-border rounded-lg bg-muted/50 space-y-2 text-sm">
+            <div className="text-muted-foreground">
+              URL: <span className="font-mono text-foreground">http://127.0.0.1:{settings.port}/v1</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-muted-foreground">Token:</span>
+              <span className="font-mono text-foreground truncate">{settings.token.slice(0, 8)}…</span>
+              <button
+                type="button"
+                className="text-muted-foreground hover:text-foreground"
+                title="Copy token"
+                onClick={() => navigator.clipboard.writeText(settings.token)}
+              >
+                <Copy className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                className="text-muted-foreground hover:text-foreground"
+                title="Regenerate token (disconnects current clients)"
+                onClick={() => update(settings.enabled, settings.allow_content, true)}
+              >
+                <RefreshCw className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function PreferenceSettings() {
   const {
     notificationSettings,
@@ -455,6 +543,10 @@ export function PreferenceSettings() {
 
       <div className="bg-background rounded-lg border border-border p-6 shadow-sm">
         <VocabularySettings />
+      </div>
+
+      <div className="bg-background rounded-lg border border-border p-6 shadow-sm">
+        <LocalApiSettingsSection />
       </div>
 
       {/* Data Storage Locations Section */}

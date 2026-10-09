@@ -43,6 +43,7 @@ pub mod config;
 pub mod console_utils;
 pub mod database;
 pub mod export;
+pub mod local_api;
 pub mod meeting_detector;
 pub mod notifications;
 pub mod ollama;
@@ -555,6 +556,7 @@ pub fn run() {
             });
 
             vocabulary::init(_app.handle());
+            local_api::init(_app.handle());
 
             // Voice embedding model for telling remote speakers apart
             audio::diarization::init(_app.handle());
@@ -731,6 +733,8 @@ pub fn run() {
             api::api_set_meeting_speaker,
             summary::speaker_names::api_suggest_speaker_names,
             vocabulary::get_vocabulary_settings,
+            local_api::get_local_api_settings,
+            local_api::set_local_api_settings,
             audio::retranscription::get_auto_retranscription_settings,
             audio::retranscription::set_auto_retranscription_settings,
             vocabulary::set_vocabulary_settings,
