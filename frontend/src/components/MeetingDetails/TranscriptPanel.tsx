@@ -89,6 +89,35 @@ export function TranscriptPanel({
     };
   }, [meetingId]);
 
+  // Background re-transcription after a recording (or Enhance) reports progress for this meeting
+  const [retranscribeProgress, setRetranscribeProgress] = useState<{ percent: number; message: string } | null>(null);
+
+  useEffect(() => {
+    if (!meetingId) return;
+    type Progress = { meeting_id: string; progress_percentage: number; message: string };
+    const unlisteners = [
+      listen<Progress>('retranscription-progress', ({ payload }) => {
+        if (payload.meeting_id !== meetingId) return;
+        setRetranscribeProgress(payload.progress_percentage >= 100 ? null : { percent: payload.progress_percentage, message: payload.message });
+      }),
+      listen<{ meeting_id: string }>('retranscription-complete', async ({ payload }) => {
+        if (payload.meeting_id !== meetingId) return;
+        setRetranscribeProgress(null);
+        await onRefetchTranscripts?.();
+        setSpeakerNames(await fetchSpeakerNames(meetingId));
+        toast.success('Transcript improved');
+      }),
+      listen<{ meeting_id: string; error: string }>('retranscription-error', ({ payload }) => {
+        if (payload.meeting_id !== meetingId) return;
+        setRetranscribeProgress(null);
+        if (!payload.error.includes('cancelled')) toast.error('Re-transcription failed', { description: payload.error });
+      }),
+    ];
+    return () => {
+      unlisteners.forEach(p => p.then(fn => fn()));
+    };
+  }, [meetingId, onRefetchTranscripts]);
+
   const [suggestions, setSuggestions] = useState<SpeakerNameSuggestions | null>(null);
   const [isSuggesting, setIsSuggesting] = useState(false);
 
@@ -145,6 +174,18 @@ export function TranscriptPanel({
           onRefetchTranscripts={onRefetchTranscripts}
         />
       </div>
+
+      {retranscribeProgress && (
+        <div className="px-4 py-2 border-b border-border bg-blue-50 dark:bg-blue-950/40">
+          <div className="flex items-center justify-between text-xs text-blue-800 dark:text-blue-300 mb-1">
+            <span className="truncate">Improving transcript: {retranscribeProgress.message}</span>
+            <span className="ml-2 flex-shrink-0">{retranscribeProgress.percent}%</span>
+          </div>
+          <div className="h-1 rounded-full bg-muted-strong overflow-hidden">
+            <div className="h-full bg-blue-600 transition-all" style={{ width: `${retranscribeProgress.percent}%` }} />
+          </div>
+        </div>
+      )}
 
       {/* Transcript content - use virtualized view for better performance */}
       <div className="flex-1 overflow-hidden pb-4">

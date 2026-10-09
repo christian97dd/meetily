@@ -729,6 +729,8 @@ pub fn run() {
             summary::speaker_names::api_suggest_speaker_names,
             summary::speaker_names::get_speaker_naming_settings,
             summary::speaker_names::set_speaker_naming_settings,
+            audio::retranscription::get_auto_retranscription_settings,
+            audio::retranscription::set_auto_retranscription_settings,
             api::api_get_profile,
             api::api_save_profile,
             api::api_update_profile,

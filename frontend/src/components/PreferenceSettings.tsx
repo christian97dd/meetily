@@ -174,6 +174,69 @@ function AutoSpeakerNamingSwitch() {
   );
 }
 
+interface AutoRetranscriptionSettings {
+  enabled: boolean;
+  model: string;
+}
+
+function AutoRetranscriptionSettingsRow() {
+  const [settings, setSettings] = useState<AutoRetranscriptionSettings | null>(null);
+
+  useEffect(() => {
+    invoke<AutoRetranscriptionSettings>('get_auto_retranscription_settings')
+      .then(setSettings)
+      .catch((error) => {
+        console.error('Failed to load retranscription settings:', error);
+        setSettings({ enabled: false, model: 'large-v3' });
+      });
+  }, []);
+
+  const save = async (next: AutoRetranscriptionSettings) => {
+    const previous = settings;
+    setSettings(next);
+    try {
+      await invoke('set_auto_retranscription_settings', { settings: next });
+    } catch (error) {
+      console.error('Failed to save retranscription settings:', error);
+      setSettings(previous);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <h3 className="text-lg font-semibold text-foreground mb-2">Re-transcribe after recording</h3>
+          <p className="text-sm text-muted-foreground">
+            When a recording ends, transcribes the full audio again with a larger Whisper model and longer context, keeping who said what. Replaces the live transcript when done; it takes a few minutes per hour of audio and uses the GPU meanwhile.
+          </p>
+        </div>
+        <Switch
+          checked={settings?.enabled ?? false}
+          disabled={settings === null}
+          onCheckedChange={(enabled) => settings && save({ ...settings, enabled })}
+        />
+      </div>
+      {settings?.enabled && (
+        <div className="flex items-center justify-between gap-4">
+          <p className="text-sm text-muted-foreground">
+            Model. Download it first in Transcription settings; if it&apos;s missing, the live model is used.
+          </p>
+          <Select value={settings.model} onValueChange={(model) => save({ ...settings, model })}>
+            <SelectTrigger className="w-44">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="large-v3">large-v3 (most accurate)</SelectItem>
+              <SelectItem value="large-v3-turbo">large-v3-turbo (faster)</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function PreferenceSettings() {
   const {
     notificationSettings,
@@ -339,6 +402,10 @@ export function PreferenceSettings() {
 
       <div className="bg-background rounded-lg border border-border p-6 shadow-sm">
         <AutoSpeakerNamingSwitch />
+      </div>
+
+      <div className="bg-background rounded-lg border border-border p-6 shadow-sm">
+        <AutoRetranscriptionSettingsRow />
       </div>
 
       {/* Data Storage Locations Section */}

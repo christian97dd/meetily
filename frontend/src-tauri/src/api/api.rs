@@ -1009,7 +1009,7 @@ pub async fn api_save_transcript<R: Runtime>(
         pool,
         &meeting_title,
         &transcripts_to_save,
-        folder_path,
+        folder_path.clone(),
     )
     .await
     {
@@ -1018,11 +1018,14 @@ pub async fn api_save_transcript<R: Runtime>(
                 "Successfully saved transcript and created meeting with id: {}",
                 meeting_id
             );
-            crate::summary::speaker_names::auto_apply_in_background(
-                &_app,
-                state.db_manager.pool().clone(),
-                meeting_id.clone(),
-            );
+            // When re-transcription runs it re-diarizes and names speakers itself afterwards
+            if !crate::audio::retranscription::auto_retranscribe_in_background(&_app, &meeting_id, folder_path.as_deref()) {
+                crate::summary::speaker_names::auto_apply_in_background(
+                    &_app,
+                    state.db_manager.pool().clone(),
+                    meeting_id.clone(),
+                );
+            }
             Ok(serde_json::json!({
                 "status": "success",
                 "message": "Transcript saved successfully",

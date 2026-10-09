@@ -82,13 +82,31 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 static MODEL_PATH: OnceLock<PathBuf> = OnceLock::new();
 static SESSION: Mutex<Option<RecordingDiarizer>> = Mutex::new(None);
 
-struct RecordingDiarizer {
+/// Voices of one recording. The live pipeline keeps one in `SESSION`; batch re-transcription creates its own.
+pub struct RecordingDiarizer {
     extractor: EmbeddingExtractor,
     speakers: SpeakerRegistry,
     last_speaker: Option<usize>,
 }
 
 impl RecordingDiarizer {
+    /// None when the model isn't downloaded yet or fails to load.
+    pub fn load() -> Option<Self> {
+        let path = MODEL_PATH.get().filter(|path| path.exists())?;
+        match EmbeddingExtractor::new(path) {
+            Ok(extractor) => Some(Self { extractor, speakers: SpeakerRegistry::new(), last_speaker: None }),
+            Err(e) => {
+                warn!("Diarization: failed to load model: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Speaker key for a system-audio segment: "system-N", or "system" when voices can't be told apart.
+    pub fn speaker_key(&mut self, samples: &[f32]) -> String {
+        speaker_key(self.speaker_for(samples))
+    }
+
     fn speaker_for(&mut self, samples: &[f32]) -> Option<usize> {
         if samples.len() < MIN_EMBEDDING_SAMPLES {
             return self.last_speaker;
@@ -148,21 +166,7 @@ async fn download_model(path: &PathBuf) -> Result<(), String> {
 
 /// Starts with no known voices. Without the model, remote speech stays as plain "system".
 pub fn start_session() {
-    let diarizer = MODEL_PATH
-        .get()
-        .filter(|path| path.exists())
-        .and_then(|path| match EmbeddingExtractor::new(path) {
-            Ok(extractor) => Some(RecordingDiarizer {
-                extractor,
-                speakers: SpeakerRegistry::new(),
-                last_speaker: None,
-            }),
-            Err(e) => {
-                warn!("Diarization: failed to load model: {}", e);
-                None
-            }
-        });
-
+    let diarizer = RecordingDiarizer::load();
     info!("Diarization: {}", if diarizer.is_some() { "enabled for this recording" } else { "unavailable" });
     if let Ok(mut session) = SESSION.lock() {
         *session = diarizer;
@@ -177,7 +181,10 @@ pub fn end_session() {
 
 /// Speaker key for a system-audio segment: "system-N", or "system" when voices can't be told apart.
 pub fn system_speaker_key(samples: &[f32]) -> String {
-    let speaker = SESSION.lock().ok().and_then(|mut session| session.as_mut()?.speaker_for(samples));
+    speaker_key(SESSION.lock().ok().and_then(|mut session| session.as_mut()?.speaker_for(samples)))
+}
+
+fn speaker_key(speaker: Option<usize>) -> String {
     match speaker {
         Some(id) => format!("system-{}", id),
         None => "system".to_string(),
