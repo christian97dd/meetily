@@ -9,6 +9,23 @@ use tauri_plugin_store::StoreExt;
 const STORE_FILE: &str = "calendar.json";
 const STORE_KEY: &str = "settings";
 
+/// Invitees without a contact name come through as their email; "ana.gomez@x.com" reads as "Ana Gomez".
+fn display_name(raw: &str) -> String {
+    let raw = raw.trim();
+    let Some((local, _domain)) = raw.split_once('@') else {
+        return raw.to_string();
+    };
+    local
+        .split(['.', '_', '-', '+'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// People invited to a calendar event. `me` is the invitee marked as the current macOS user.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct EventAttendees {
@@ -125,7 +142,7 @@ mod eventkit {
                 if participant.participantType() != EKParticipantType::Person {
                     continue;
                 }
-                let Some(name) = participant.name().map(|n| n.to_string().trim().to_string()) else {
+                let Some(name) = participant.name().map(|n| super::display_name(&n.to_string())) else {
                     continue;
                 };
                 if name.is_empty() {
@@ -200,4 +217,20 @@ pub async fn get_current_calendar_event_title<R: Runtime>(app: AppHandle<R>) -> 
     tokio::task::spawn_blocking(eventkit::current_event_title)
         .await
         .map_err(|e| format!("Calendar lookup failed: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::display_name;
+
+    #[test]
+    fn emails_become_readable_names() {
+        assert_eq!(display_name("ana.gomez@example.com"), "Ana Gomez");
+        assert_eq!(display_name(" juan_perez-2@example.com "), "Juan Perez 2");
+    }
+
+    #[test]
+    fn real_names_are_kept() {
+        assert_eq!(display_name("  María López "), "María López");
+    }
 }
