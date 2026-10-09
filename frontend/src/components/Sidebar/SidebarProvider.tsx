@@ -4,6 +4,7 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import type { SummaryProcessResponse } from '@/types';
 
@@ -115,6 +116,16 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     fetchMeetings();
   }, [serverAddress, fetchMeetings]);
+
+  // Meetings changed outside the UI (e.g. deleted through the local API)
+  useEffect(() => {
+    const unlisten = listen('meetings-changed', () => {
+      fetchMeetings();
+    });
+    return () => {
+      unlisten.then(fn => fn());
+    };
+  }, [fetchMeetings]);
 
   useEffect(() => {
     const fetchSettings = async () => {

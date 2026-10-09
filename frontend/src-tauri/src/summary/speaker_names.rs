@@ -184,7 +184,7 @@ async fn resolve_llm(pool: &sqlx::SqlitePool) -> Result<ResolvedLlm, String> {
     Ok(resolved)
 }
 
-async fn suggest<R: Runtime>(
+pub(crate) async fn suggest<R: Runtime>(
     app: &AppHandle<R>,
     pool: &SqlitePool,
     meeting_id: &str,

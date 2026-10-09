@@ -285,6 +285,7 @@ function VocabularySettings() {
 interface LocalApiSettings {
   enabled: boolean;
   allow_content: boolean;
+  allow_delete: boolean;
   port: number;
   token: string;
 }
@@ -298,10 +299,17 @@ function LocalApiSettingsSection() {
       .catch((error) => console.error('Failed to load local API settings:', error));
   }, []);
 
-  const update = async (enabled: boolean, allowContent: boolean, regenerateToken = false) => {
+  const update = async (changes: Partial<Pick<LocalApiSettings, 'enabled' | 'allow_content' | 'allow_delete'>>, regenerateToken = false) => {
+    if (!settings) return;
+    const next = { ...settings, ...changes };
     try {
       setSettings(await invoke<LocalApiSettings>('set_local_api_settings', {
-        update: { enabled, allow_content: allowContent, regenerate_token: regenerateToken },
+        update: {
+          enabled: next.enabled,
+          allow_content: next.allow_content,
+          allow_delete: next.allow_delete,
+          regenerate_token: regenerateToken,
+        },
       }));
     } catch (error) {
       console.error('Failed to save local API settings:', error);
@@ -319,7 +327,7 @@ function LocalApiSettingsSection() {
             Lets tools on this Mac (an MCP server, scripts) list meetings, summarize, export and control recording. Only reachable from this computer and only with the token below.
           </p>
         </div>
-        <Switch checked={settings.enabled} onCheckedChange={(enabled) => update(enabled, settings.allow_content)} />
+        <Switch checked={settings.enabled} onCheckedChange={(enabled) => update({ enabled })} />
       </div>
 
       {settings.enabled && (
@@ -336,7 +344,17 @@ function LocalApiSettingsSection() {
                 </p>
               )}
             </div>
-            <Switch checked={settings.allow_content} onCheckedChange={(allow) => update(settings.enabled, allow)} />
+            <Switch checked={settings.allow_content} onCheckedChange={(allow) => update({ allow_content: allow })} />
+          </div>
+
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <div className="font-medium text-foreground">Allow deleting meetings</div>
+              <p className="text-sm text-muted-foreground">
+                Removes the meeting, its transcript, summary and recording files. It can&apos;t be undone.
+              </p>
+            </div>
+            <Switch checked={settings.allow_delete} onCheckedChange={(allow) => update({ allow_delete: allow })} />
           </div>
 
           <div className="p-3 border border-border rounded-lg bg-muted/50 space-y-2 text-sm">
@@ -358,7 +376,7 @@ function LocalApiSettingsSection() {
                 type="button"
                 className="text-muted-foreground hover:text-foreground"
                 title="Regenerate token (disconnects current clients)"
-                onClick={() => update(settings.enabled, settings.allow_content, true)}
+                onClick={() => update({}, true)}
               >
                 <RefreshCw className="w-4 h-4" />
               </button>

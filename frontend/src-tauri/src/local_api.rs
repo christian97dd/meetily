@@ -4,7 +4,7 @@
 //! Off by default. Listens on 127.0.0.1 only and every request needs the bearer token stored in
 //! `local-api.json` in the app data dir, which is also where clients discover the port. Endpoints
 //! that return meeting content (transcripts, summaries, search) additionally need `allow_content`,
-//! so a client can be given control without reading what was said.
+//! so a client can be given control without reading what was said; deleting needs `allow_delete`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,7 +20,7 @@ use axum::{Json, Router};
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager, Wry};
+use tauri::{AppHandle, Emitter, Manager, Wry};
 use tauri_plugin_store::StoreExt;
 
 use crate::database::models::Transcript;
@@ -43,13 +43,16 @@ pub struct LocalApiSettings {
     pub enabled: bool,
     /// Lets clients read transcripts, summaries and search results, not only metadata and actions.
     pub allow_content: bool,
+    /// Lets clients delete meetings, including their recording folder. Can't be undone.
+    #[serde(default)]
+    pub allow_delete: bool,
     pub port: u16,
     pub token: String,
 }
 
 impl Default for LocalApiSettings {
     fn default() -> Self {
-        Self { enabled: false, allow_content: false, port: DEFAULT_PORT, token: String::new() }
+        Self { enabled: false, allow_content: false, allow_delete: false, port: DEFAULT_PORT, token: String::new() }
     }
 }
 
@@ -78,6 +81,7 @@ struct ApiState {
     app: AppHandle<Wry>,
     token: String,
     allow_content: bool,
+    allow_delete: bool,
 }
 
 /// Starts the server at app startup when the user enabled it.
@@ -100,7 +104,12 @@ fn restart(app: &AppHandle<Wry>, settings: &LocalApiSettings) {
         return;
     }
 
-    let state = ApiState { app: app.clone(), token: settings.token.clone(), allow_content: settings.allow_content };
+    let state = ApiState {
+        app: app.clone(),
+        token: settings.token.clone(),
+        allow_content: settings.allow_content,
+        allow_delete: settings.allow_delete,
+    };
     let port = settings.port;
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     if let Ok(mut shutdown) = SHUTDOWN.lock() {
@@ -133,7 +142,10 @@ fn router(state: ApiState) -> Router {
     Router::new()
         .route("/v1/status", get(status))
         .route("/v1/meetings", get(list_meetings))
-        .route("/v1/meetings/{id}", get(get_meeting))
+        .route("/v1/meetings/{id}", get(get_meeting).patch(rename_meeting).delete(delete_meeting))
+        .route("/v1/meetings/{id}/retranscribe", post(retranscribe))
+        .route("/v1/meetings/{id}/speakers/suggest", post(suggest_speakers))
+        .route("/v1/meetings/{id}/speakers/{key}", axum::routing::put(set_speaker))
         .route("/v1/meetings/{id}/transcript", get(get_transcript))
         .route("/v1/meetings/{id}/summary", get(get_summary))
         .route("/v1/meetings/{id}/summarize", post(summarize))
@@ -143,6 +155,8 @@ fn router(state: ApiState) -> Router {
         .route("/v1/recording", get(recording_status))
         .route("/v1/recording/start", post(start_recording))
         .route("/v1/recording/stop", post(stop_recording))
+        .route("/v1/recording/pause", post(pause_recording))
+        .route("/v1/recording/resume", post(resume_recording))
         .layer(middleware::from_fn_with_state(state.clone(), require_token))
         .with_state(state)
 }
@@ -339,6 +353,7 @@ async fn get_meeting(State(state): State<ApiState>, Path(id): Path<String>) -> A
         "speakers": speakers,
         "has_separate_tracks": has_tracks,
         "summary_status": summary.status,
+        "retranscribing": crate::audio::retranscription::is_retranscription_in_progress(),
     })))
 }
 
@@ -529,6 +544,183 @@ async fn stop_recording(State(state): State<ApiState>) -> ApiResult {
     Ok(Json(json!({ "status": "stopped" })))
 }
 
+#[derive(Deserialize)]
+struct RenameBody {
+    title: String,
+}
+
+async fn rename_meeting(State(state): State<ApiState>, Path(id): Path<String>, Json(body): Json<RenameBody>) -> ApiResult {
+    let title = body.title.trim();
+    if title.is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "title can't be empty".into()));
+    }
+    let app_state = state.app.state::<AppState>();
+    if !MeetingsRepository::update_meeting_title(app_state.db_manager.pool(), &id, title).await.map_err(internal)? {
+        return Err(ApiError(StatusCode::NOT_FOUND, format!("Meeting not found: {}", id)));
+    }
+    let _ = state.app.emit("meetings-changed", &id);
+    Ok(Json(json!({ "id": id, "title": title })))
+}
+
+#[derive(Deserialize)]
+struct RetranscribeBody {
+    /// Whisper model (e.g. large-v3); the configured one when omitted
+    model: Option<String>,
+    /// Language code (e.g. es); the app's language preference when omitted
+    language: Option<String>,
+}
+
+async fn retranscribe(State(state): State<ApiState>, Path(id): Path<String>, Json(body): Json<RetranscribeBody>) -> ApiResult {
+    if crate::audio::retranscription::is_retranscription_in_progress() {
+        return Err(ApiError(StatusCode::CONFLICT, "A re-transcription is already running".into()));
+    }
+    // Loading another model would swap it under the live recording
+    if crate::audio::recording_commands::is_recording().await {
+        return Err(ApiError(StatusCode::CONFLICT, "Can't re-transcribe while recording".into()));
+    }
+    let app_state = state.app.state::<AppState>();
+    let folder = MeetingsRepository::get_meeting_metadata(app_state.db_manager.pool(), &id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("Meeting not found: {}", id)))?
+        .folder_path
+        .ok_or_else(|| ApiError(StatusCode::CONFLICT, "Meeting has no recording to re-transcribe".into()))?;
+
+    let language = body.language.or_else(crate::get_language_preference_internal);
+    let app = state.app.clone();
+    let meeting_id = id.clone();
+    // Progress, completion and errors reach the app (and its open meeting view) as events
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = crate::audio::retranscription::start_retranscription(
+            app, meeting_id.clone(), folder, language, body.model, Some("whisper".to_string()),
+        )
+        .await
+        {
+            warn!("Local API: re-transcription of {} failed: {}", meeting_id, e);
+        }
+    });
+    Ok(Json(json!({ "id": id, "status": "started" })))
+}
+
+/// Speaker keys the app stores: the local user, unseparated remote audio, or remote speaker N.
+fn is_speaker_key(key: &str) -> bool {
+    key == "mic"
+        || key == "system"
+        || key.strip_prefix("system-").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+#[derive(Deserialize)]
+struct SpeakerBody {
+    /// Empty restores the default label
+    name: String,
+}
+
+async fn set_speaker(
+    State(state): State<ApiState>,
+    Path((id, key)): Path<(String, String)>,
+    Json(body): Json<SpeakerBody>,
+) -> ApiResult {
+    if !is_speaker_key(&key) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, format!("Unknown speaker key: {}", key)));
+    }
+    let app_state = state.app.state::<AppState>();
+    let pool = app_state.db_manager.pool();
+    if MeetingsRepository::get_meeting_metadata(pool, &id).await.map_err(internal)?.is_none() {
+        return Err(ApiError(StatusCode::NOT_FOUND, format!("Meeting not found: {}", id)));
+    }
+    SpeakersRepository::set_name(pool, &id, &key, &body.name).await.map_err(internal)?;
+    let _ = state.app.emit("speaker-names-updated", &id);
+    Ok(Json(json!({ "id": id, "speaker": key, "name": body.name.trim() })))
+}
+
+#[derive(Deserialize, Default)]
+struct SuggestBody {
+    /// Save the suggestions (skipping speakers already named) instead of only returning them
+    #[serde(default)]
+    apply: bool,
+}
+
+async fn suggest_speakers(State(state): State<ApiState>, Path(id): Path<String>, body: Option<Json<SuggestBody>>) -> ApiResult {
+    let apply = body.map(|Json(b)| b.apply).unwrap_or_default();
+    // Suggested names are people from the calendar; returning them needs content access, applying doesn't
+    if !apply {
+        require_content(&state)?;
+    }
+    let app_state = state.app.state::<AppState>();
+    let pool = app_state.db_manager.pool();
+    if MeetingsRepository::get_meeting_metadata(pool, &id).await.map_err(internal)?.is_none() {
+        return Err(ApiError(StatusCode::NOT_FOUND, format!("Meeting not found: {}", id)));
+    }
+    let suggestions = crate::summary::speaker_names::suggest(&state.app, pool, &id)
+        .await
+        .map_err(|e| ApiError(StatusCode::CONFLICT, e))?;
+
+    if !apply {
+        return Ok(Json(json!({ "id": id, "names": suggestions.names, "calendar_enabled": suggestions.calendar_enabled })));
+    }
+    let existing = SpeakersRepository::get_names(pool, &id).await.map_err(internal)?;
+    let mut applied = 0;
+    for (speaker, name) in suggestions.names.iter().filter(|(speaker, _)| !existing.contains_key(*speaker)) {
+        SpeakersRepository::set_name(pool, &id, speaker, name).await.map_err(internal)?;
+        applied += 1;
+    }
+    if applied > 0 {
+        let _ = state.app.emit("speaker-names-updated", &id);
+    }
+    Ok(Json(json!({ "id": id, "applied": applied, "calendar_enabled": suggestions.calendar_enabled })))
+}
+
+/// Removes a meeting's recording folder only when it looks like one meetily created, so a bad
+/// folder_path in the database can never take an unrelated directory with it.
+fn is_meeting_folder(folder: &std::path::Path) -> bool {
+    folder.is_dir() && folder.join("metadata.json").is_file()
+}
+
+async fn delete_meeting(State(state): State<ApiState>, Path(id): Path<String>) -> ApiResult {
+    if !state.allow_delete {
+        return Err(ApiError(StatusCode::FORBIDDEN, "Deleting meetings is disabled in meetily Preferences".into()));
+    }
+    let app_state = state.app.state::<AppState>();
+    let pool = app_state.db_manager.pool();
+    let meeting = MeetingsRepository::get_meeting_metadata(pool, &id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("Meeting not found: {}", id)))?;
+
+    if !MeetingsRepository::delete_meeting(pool, &id).await.map_err(internal)? {
+        return Err(ApiError(StatusCode::NOT_FOUND, format!("Meeting not found: {}", id)));
+    }
+
+    let folder_removed = match meeting.folder_path.as_deref().map(PathBuf::from) {
+        Some(folder) if is_meeting_folder(&folder) => match std::fs::remove_dir_all(&folder) {
+            Ok(()) => true,
+            Err(e) => {
+                warn!("Local API: deleted meeting {} but not its folder {}: {}", id, folder.display(), e);
+                false
+            }
+        },
+        _ => false,
+    };
+    // The sidebar keeps its own list; tell it to reload
+    let _ = state.app.emit("meetings-changed", &id);
+    info!("Local API: deleted meeting {} (folder removed: {})", id, folder_removed);
+    Ok(Json(json!({ "id": id, "deleted": true, "folder_removed": folder_removed })))
+}
+
+async fn pause_recording(State(state): State<ApiState>) -> ApiResult {
+    crate::audio::recording_commands::pause_recording(state.app.clone())
+        .await
+        .map_err(|e| ApiError(StatusCode::CONFLICT, e))?;
+    Ok(Json(json!({ "status": "paused" })))
+}
+
+async fn resume_recording(State(state): State<ApiState>) -> ApiResult {
+    crate::audio::recording_commands::resume_recording(state.app.clone())
+        .await
+        .map_err(|e| ApiError(StatusCode::CONFLICT, e))?;
+    Ok(Json(json!({ "status": "recording" })))
+}
+
 // ---------- Settings commands ----------
 
 #[tauri::command]
@@ -541,6 +733,8 @@ pub struct LocalApiSettingsUpdate {
     pub enabled: bool,
     pub allow_content: bool,
     #[serde(default)]
+    pub allow_delete: bool,
+    #[serde(default)]
     pub regenerate_token: bool,
 }
 
@@ -550,6 +744,7 @@ pub async fn set_local_api_settings(app: AppHandle<Wry>, update: LocalApiSetting
     let mut settings = load_settings(&app);
     settings.enabled = update.enabled;
     settings.allow_content = update.allow_content;
+    settings.allow_delete = update.allow_delete;
     if settings.token.is_empty() || update.regenerate_token {
         settings.token = new_token();
     }
@@ -600,6 +795,32 @@ mod tests {
         assert!(checked_output_path(dir.path().join("out.md").to_str().unwrap()).is_ok());
         assert!(checked_output_path("relative/out.md").is_err());
         assert!(checked_output_path(dir.path().join("missing/out.md").to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn speaker_keys_are_validated() {
+        for key in ["mic", "system", "system-1", "system-12"] {
+            assert!(is_speaker_key(key), "{key}");
+        }
+        for key in ["", "you", "system-", "system-a", "system-1x", "../x"] {
+            assert!(!is_speaker_key(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn only_meetily_folders_are_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!is_meeting_folder(dir.path()));
+        std::fs::write(dir.path().join("metadata.json"), "{}").unwrap();
+        assert!(is_meeting_folder(dir.path()));
+        assert!(!is_meeting_folder(&dir.path().join("missing")));
+    }
+
+    #[test]
+    fn settings_saved_before_delete_existed_default_to_no_delete() {
+        let old: LocalApiSettings =
+            serde_json::from_str(r#"{"enabled":true,"allow_content":false,"port":47320,"token":"t"}"#).unwrap();
+        assert!(!old.allow_delete);
     }
 
     #[test]
