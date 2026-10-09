@@ -24,7 +24,11 @@ export function SpeakerSuggestionsDialog({ suggestions, currentNames, onClose, o
   const [accepted, setAccepted] = useState<Record<string, boolean>>({});
   const [isSaving, setIsSaving] = useState(false);
   const router = useRouter();
-  const entries = Object.entries(suggestions?.names ?? {}).sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
+  const suggested = Object.entries(suggestions?.names ?? {});
+  // Suggestions the speaker already carries need no action
+  const entries = suggested
+    .filter(([speaker, name]) => currentNames[speaker] !== name)
+    .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
 
   useEffect(() => {
     setAccepted(Object.fromEntries(Object.keys(suggestions?.names ?? {}).map(speaker => [speaker, true])));
@@ -59,6 +63,8 @@ export function SpeakerSuggestionsDialog({ suggestions, currentNames, onClose, o
       )
       : suggestions.attendees.length === 0
         ? 'No calendar event with invitees overlapped this meeting.'
+        : entries.length === 0 && suggested.length > 0
+          ? 'All suggested names are already applied.'
         : entries.length === 0
           ? `Invitees: ${suggestions.attendees.join(', ')}. Nobody was addressed by name clearly enough to match them.`
           : `Matched from the calendar invitees and how people address each other. Review before applying.`;
@@ -68,22 +74,25 @@ export function SpeakerSuggestionsDialog({ suggestions, currentNames, onClose, o
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Suggested speaker names</DialogTitle>
-          <DialogDescription>{description}</DialogDescription>
+          <DialogDescription className="break-words">{description}</DialogDescription>
         </DialogHeader>
 
         {entries.length > 0 && (
           <ul className="my-2 space-y-2">
             {entries.map(([speaker, name]) => (
               <li key={speaker}>
-                <label className="flex items-center gap-3 text-sm text-foreground">
+                {/* minmax(0,1fr) lets long names (e.g. emails) truncate instead of widening the dialog */}
+                <label className="grid grid-cols-[auto_minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 text-sm text-foreground">
                   <input
                     type="checkbox"
                     checked={accepted[speaker] ?? false}
                     onChange={(e) => setAccepted(prev => ({ ...prev, [speaker]: e.target.checked }))}
                   />
-                  <span className="text-muted-foreground">{speakerLabel(speaker, currentNames)}</span>
+                  <span className="truncate text-muted-foreground" title={speakerLabel(speaker, currentNames) ?? undefined}>
+                    {speakerLabel(speaker, currentNames)}
+                  </span>
                   <span>→</span>
-                  <span className="font-medium">{name}</span>
+                  <span className="truncate font-medium" title={name}>{name}</span>
                 </label>
               </li>
             ))}
