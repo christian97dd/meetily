@@ -16,15 +16,12 @@ use super::vad::{ContinuousVadProcessor, SpeechSegment};
 /// How long a silence must last before the VAD closes a speech segment, and
 /// therefore how long the audio clips handed to the ASR engine are.
 ///
-/// Live-path policy: 500ms (matches the established Meetily Pro live policy).
-/// The batch paths (`import.rs` / `retranscription.rs`) use 2000ms instead —
-/// they have no latency requirement, so they optimize purely for ASR request
-/// length. The live path cannot: with continuous audio (e.g. a podcast played
-/// as system audio) a 2000ms redemption keeps one VAD segment open
-/// indefinitely, withholds live transcript emission, and overruns the
-/// accumulated-speech-buffer warning threshold. Bounded live segmentation
-/// during continuous speech is tracked separately in #756.
-const VAD_REDEMPTION_TIME_MS: u32 = 500;
+/// 2000ms, same as the batch paths (`import.rs` / `retranscription.rs`), so normal
+/// pauses no longer split speech into short, context-poor clips (upstream #711).
+/// On its own this kept a VAD segment open indefinitely under continuous audio
+/// (e.g. a podcast played as system audio); the live segment bounds below cap
+/// that, which is what made raising it from 500ms safe (#756).
+const VAD_REDEMPTION_TIME_MS: u32 = 2_000;
 
 /// Live transcription is delivered incrementally during uninterrupted speech.
 /// The target leaves room for a frame to arrive before the hard ceiling.
@@ -757,12 +754,8 @@ impl AudioPipeline {
         // Measured on a real recording, 47% of segment boundaries sat in the
         // 0.42-0.75s range that a longer redemption bridges.
         //
-        // 500ms is the live-path policy (see the constant's doc comment). The
-        // batch value (2000ms, `import.rs`/`retranscription.rs`) was tried here
-        // first, but under continuous system audio it kept a VAD segment open
-        // indefinitely and withheld live transcript emission, so live and batch
-        // deliberately diverge. Bounded live segments under continuous speech
-        // are tracked in #756.
+        // Live now matches the batch 2000ms; see the constant's doc comment for
+        // why that needs the bounded live segments.
         let mic_vad = ContinuousVadProcessor::new(sample_rate, VAD_REDEMPTION_TIME_MS)?;
         let system_vad = ContinuousVadProcessor::new(sample_rate, VAD_REDEMPTION_TIME_MS)?;
         info!(
@@ -875,8 +868,8 @@ impl AudioPipeline {
                                 Err(e) => warn!("⚠️ System VAD error: {}", e),
                             }
 
-                            // Bound uninterrupted live speech while leaving the
-                            // established 500ms redemption policy unchanged.
+                            // Bound uninterrupted live speech; the 2000ms redemption alone
+                            // never closes a segment under continuous audio.
                             self.send_bounded_live_segments(DeviceType::Microphone);
                             self.send_bounded_live_segments(DeviceType::System);
 
@@ -1118,11 +1111,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_live_vad_redemption_matches_pro_policy() {
-        // Live uses the established 500ms pause policy; it does not bound
-        // uninterrupted speech. Batch import/retranscription use 2000ms.
-        // See #679 and #756.
-        assert_eq!(VAD_REDEMPTION_TIME_MS, 500);
+    fn test_live_vad_redemption_matches_batch_policy() {
+        // Live bridges normal pauses like batch import/retranscription (2000ms);
+        // uninterrupted speech is bounded by the live segment limits instead.
+        // See #679, #711 and #756.
+        assert_eq!(VAD_REDEMPTION_TIME_MS, 2_000);
     }
 
     #[test]
