@@ -46,7 +46,6 @@ struct AudioContext {
     format: arc::R<av::AudioFormat>,
     producer: HeapProd<f32>,
     waker_state: Arc<Mutex<WakerState>>,
-    current_sample_rate: Arc<AtomicU32>,
     consecutive_drops: Arc<AtomicU32>,
     should_terminate: Arc<AtomicBool>,
 }
@@ -156,7 +155,7 @@ impl CoreAudioCapture {
         ctx: &mut Box<AudioContext>,
     ) -> Result<ca::hardware::StartedDevice<ca::AggregateDevice>> {
         extern "C" fn audio_proc(
-            device: ca::Device,
+            _device: ca::Device,
             _now: &cat::AudioTimeStamp,
             input_data: &cat::AudioBufList<1>,
             _input_time: &cat::AudioTimeStamp,
@@ -166,15 +165,9 @@ impl CoreAudioCapture {
         ) -> os::Status {
             let ctx = ctx.unwrap();
 
-            // Check for sample rate changes
-            let after = device
-                .nominal_sample_rate()
-                .unwrap_or(ctx.format.absd().sample_rate) as u32;
-            let before = ctx.current_sample_rate.load(Ordering::Acquire);
-
-            if before != after {
-                ctx.current_sample_rate.store(after, Ordering::Release);
-            }
+            // No CoreAudio property queries here: this runs on the real-time IO thread, and querying
+            // the HAL from it (the nominal sample rate, on every buffer) could block on CoreAudio's
+            // internal lock and stall capture. The rate is only read once, when the stream is created.
 
             // Try to get audio data from the buffer list
             if let Some(view) =
@@ -274,7 +267,6 @@ impl CoreAudioCapture {
             format,
             producer,
             waker_state: waker_state.clone(),
-            current_sample_rate: current_sample_rate.clone(),
             consecutive_drops: Arc::new(AtomicU32::new(0)),
             should_terminate: Arc::new(AtomicBool::new(false)),
         });
