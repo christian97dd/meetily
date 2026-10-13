@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
-use tauri_plugin_store::StoreExt;
 
 /// Global flag to track if retranscription is in progress
 static RETRANSCRIPTION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
@@ -79,82 +78,23 @@ pub struct RetranscriptionError {
     pub error: String,
 }
 
-const AUTO_STORE_FILE: &str = "retranscription.json";
-const AUTO_STORE_KEY: &str = "settings";
-/// No latency budget after the meeting, so the slower full model is worth it
-const DEFAULT_AUTO_MODEL: &str = "large-v3";
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AutoRetranscriptionSettings {
-    /// Re-transcribe each recording once it is saved, replacing the live transcript.
-    pub enabled: bool,
-    /// Whisper model used for it.
-    pub model: String,
-}
-
-impl Default for AutoRetranscriptionSettings {
-    fn default() -> Self {
-        Self { enabled: false, model: DEFAULT_AUTO_MODEL.to_string() }
+/// Asks a running re-transcription to stop and waits for it to let go of the engine, so a recording
+/// that's starting doesn't share the Whisper engine with it. Returns false if it didn't stop in time.
+pub async fn cancel_and_wait(timeout: std::time::Duration) -> bool {
+    if !is_retranscription_in_progress() {
+        return true;
     }
-}
-
-fn load_auto_settings<R: Runtime>(app: &AppHandle<R>) -> AutoRetranscriptionSettings {
-    app.store(AUTO_STORE_FILE)
-        .ok()
-        .and_then(|store| store.get(AUTO_STORE_KEY))
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default()
-}
-
-/// Starts re-transcribing a just-saved recording when the user opted in and it has separate tracks.
-/// Returns whether it was scheduled, so callers can leave follow-up steps (speaker naming) to it.
-pub fn auto_retranscribe_in_background<R: Runtime>(app: &AppHandle<R>, meeting_id: &str, meeting_folder: Option<&str>) -> bool {
-    let settings = load_auto_settings(app);
-    let Some(folder) = meeting_folder.filter(|folder| settings.enabled && super::track_recorder::existing_tracks(Path::new(folder)).is_some()) else {
-        return false;
-    };
-
-    let app = app.clone();
-    let meeting_id = meeting_id.to_string();
-    let folder = folder.to_string();
-    tauri::async_runtime::spawn(async move {
-        // Loading the batch model would swap it under a recording that just started
-        if super::recording_commands::is_recording().await {
-            warn!("Auto retranscription skipped for {}: a new recording is in progress", meeting_id);
-            return;
+    info!("Cancelling the running re-transcription: a recording is starting");
+    cancel_retranscription();
+    let deadline = tokio::time::Instant::now() + timeout;
+    while is_retranscription_in_progress() {
+        if tokio::time::Instant::now() >= deadline {
+            warn!("Re-transcription did not stop within {:?}", timeout);
+            return false;
         }
-        let language = crate::get_language_preference_internal();
-        let provider = Some("whisper".to_string());
-        let mut result = start_retranscription(
-            app.clone(), meeting_id.clone(), folder.clone(), language.clone(), Some(settings.model.clone()), provider.clone(),
-        )
-        .await;
-        if let Err(e) = &result {
-            // Usually the chosen model isn't downloaded; the live model is still better than nothing
-            warn!("Auto retranscription with {} failed ({}), retrying with the configured model", settings.model, e);
-            result = start_retranscription(app, meeting_id.clone(), folder, language, None, provider).await;
-        }
-        match result {
-            Ok(done) => info!("Auto retranscription finished for {}: {} segments", meeting_id, done.segments_count),
-            Err(e) => warn!("Auto retranscription failed for {}: {}", meeting_id, e),
-        }
-    });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
     true
-}
-
-#[tauri::command]
-pub async fn get_auto_retranscription_settings<R: Runtime>(app: AppHandle<R>) -> Result<AutoRetranscriptionSettings, String> {
-    Ok(load_auto_settings(&app))
-}
-
-#[tauri::command]
-pub async fn set_auto_retranscription_settings<R: Runtime>(
-    app: AppHandle<R>,
-    settings: AutoRetranscriptionSettings,
-) -> Result<(), String> {
-    let store = app.store(AUTO_STORE_FILE).map_err(|e| format!("Failed to access retranscription store: {}", e))?;
-    store.set(AUTO_STORE_KEY, serde_json::to_value(&settings).map_err(|e| e.to_string())?);
-    store.save().map_err(|e| format!("Failed to save retranscription settings: {}", e))
 }
 
 /// Check if retranscription is currently in progress
@@ -176,6 +116,11 @@ pub async fn start_retranscription<R: Runtime>(
     model: Option<String>,
     provider: Option<String>,
 ) -> Result<RetranscriptionResult> {
+    // Loading a batch model would swap it under the live recording's engine
+    if super::recording_commands::is_recording().await {
+        return Err(anyhow!("Can't re-transcribe while recording"));
+    }
+
     // Acquire guard - ensures flag is cleared even on panic/early return
     let _guard = RetranscriptionGuard::acquire().map_err(|e| anyhow!(e))?;
 
@@ -601,6 +546,17 @@ async fn run_retranscription<R: Runtime>(
                 .map_err(|e| anyhow!("Failed to carry over speaker name: {}", e))?;
         }
     }
+
+    sqlx::query(
+        "INSERT INTO meeting_retranscriptions (meeting_id, completed_at, model) VALUES (?, ?, ?)
+         ON CONFLICT(meeting_id) DO UPDATE SET completed_at = excluded.completed_at, model = excluded.model",
+    )
+    .bind(&meeting_id)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(&model)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| anyhow!("Failed to record the re-transcription: {}", e))?;
 
     tx.commit().await
         .map_err(|e| anyhow!("Failed to commit transaction: {}", e))?;

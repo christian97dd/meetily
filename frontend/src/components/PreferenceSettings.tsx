@@ -175,31 +175,32 @@ function AutoSpeakerNamingSwitch() {
   );
 }
 
-interface AutoRetranscriptionSettings {
+interface RetranscriptionSchedule {
   enabled: boolean;
+  time: string;
   model: string;
 }
 
-function AutoRetranscriptionSettingsRow() {
-  const [settings, setSettings] = useState<AutoRetranscriptionSettings | null>(null);
+function ScheduledRetranscriptionRow() {
+  const [schedule, setSchedule] = useState<RetranscriptionSchedule | null>(null);
 
   useEffect(() => {
-    invoke<AutoRetranscriptionSettings>('get_auto_retranscription_settings')
-      .then(setSettings)
+    invoke<RetranscriptionSchedule>('get_retranscription_schedule')
+      .then(setSchedule)
       .catch((error) => {
-        console.error('Failed to load retranscription settings:', error);
-        setSettings({ enabled: false, model: 'large-v3' });
+        console.error('Failed to load retranscription schedule:', error);
+        setSchedule({ enabled: false, time: '22:00', model: 'large-v3' });
       });
   }, []);
 
-  const save = async (next: AutoRetranscriptionSettings) => {
-    const previous = settings;
-    setSettings(next);
+  const save = async (next: RetranscriptionSchedule) => {
+    const previous = schedule;
+    setSchedule(next);
     try {
-      await invoke('set_auto_retranscription_settings', { settings: next });
+      await invoke('set_retranscription_schedule', { settings: next });
     } catch (error) {
-      console.error('Failed to save retranscription settings:', error);
-      setSettings(previous);
+      console.error('Failed to save retranscription schedule:', error);
+      setSchedule(previous);
     }
   };
 
@@ -207,24 +208,30 @@ function AutoRetranscriptionSettingsRow() {
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-4">
         <div>
-          <h3 className="text-lg font-semibold text-foreground mb-2">Re-transcribe after recording</h3>
+          <h3 className="text-lg font-semibold text-foreground mb-2">Scheduled re-transcription</h3>
           <p className="text-sm text-muted-foreground">
-            When a recording ends, transcribes the full audio again with a larger Whisper model and longer context, keeping who said what. Replaces the live transcript when done; it takes a few minutes per hour of audio and uses the GPU meanwhile.
+            Once a day, transcribes again every meeting recorded with separate tracks that wasn&apos;t re-transcribed yet, with a larger Whisper model, keeping who said what. It waits while you record and resumes after. You can also do it for one meeting with the Re-transcribe button in the meeting.
           </p>
         </div>
         <Switch
-          checked={settings?.enabled ?? false}
-          disabled={settings === null}
-          onCheckedChange={(enabled) => settings && save({ ...settings, enabled })}
+          checked={schedule?.enabled ?? false}
+          disabled={schedule === null}
+          onCheckedChange={(enabled) => schedule && save({ ...schedule, enabled })}
         />
       </div>
-      {settings?.enabled && (
-        <div className="flex items-center justify-between gap-4">
-          <p className="text-sm text-muted-foreground">
-            Model. Download it first in Transcription settings; if it&apos;s missing, the live model is used.
-          </p>
-          <Select value={settings.model} onValueChange={(model) => save({ ...settings, model })}>
-            <SelectTrigger className="w-44">
+      {schedule?.enabled && (
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <label className="flex items-center gap-2 text-sm text-muted-foreground">
+            Every day at
+            <input
+              type="time"
+              className="rounded-md border border-input bg-background px-2 py-1 text-foreground"
+              value={schedule.time}
+              onChange={(e) => e.target.value && save({ ...schedule, time: e.target.value })}
+            />
+          </label>
+          <Select value={schedule.model} onValueChange={(model) => save({ ...schedule, model })}>
+            <SelectTrigger className="w-52">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -232,6 +239,9 @@ function AutoRetranscriptionSettingsRow() {
               <SelectItem value="large-v3-turbo">large-v3-turbo (faster)</SelectItem>
             </SelectContent>
           </Select>
+          <p className="w-full text-xs text-muted-foreground">
+            meetily has to be open at that time. If the model isn&apos;t downloaded, the live model is used.
+          </p>
         </div>
       )}
     </div>
@@ -556,7 +566,7 @@ export function PreferenceSettings() {
       </div>
 
       <div className="bg-background rounded-lg border border-border p-6 shadow-sm">
-        <AutoRetranscriptionSettingsRow />
+        <ScheduledRetranscriptionRow />
       </div>
 
       <div className="bg-background rounded-lg border border-border p-6 shadow-sm">

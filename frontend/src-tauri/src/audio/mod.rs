@@ -49,6 +49,7 @@ pub mod constants;
 
 // Retranscription module (re-process stored audio with different settings)
 pub mod retranscription;
+pub mod retranscription_schedule;
 
 // Import module (import external audio files as new meetings)
 pub mod import;

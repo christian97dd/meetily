@@ -557,6 +557,7 @@ pub fn run() {
 
             vocabulary::init(_app.handle());
             local_api::init(_app.handle());
+            audio::retranscription_schedule::spawn(_app.handle().clone());
 
             // Voice embedding model for telling remote speakers apart
             audio::diarization::init(_app.handle());
@@ -735,8 +736,8 @@ pub fn run() {
             vocabulary::get_vocabulary_settings,
             local_api::get_local_api_settings,
             local_api::set_local_api_settings,
-            audio::retranscription::get_auto_retranscription_settings,
-            audio::retranscription::set_auto_retranscription_settings,
+            audio::retranscription_schedule::get_retranscription_schedule,
+            audio::retranscription_schedule::set_retranscription_schedule,
             vocabulary::set_vocabulary_settings,
             summary::speaker_names::get_speaker_naming_settings,
             summary::speaker_names::set_speaker_naming_settings,
