@@ -5,6 +5,7 @@
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use hound::{SampleFormat, WavSpec, WavWriter};
@@ -17,6 +18,9 @@ pub const SYSTEM_TRACK_FILE: &str = "system.wav";
 const TRACK_SAMPLE_RATE: u32 = 16_000;
 
 static TRACKS: Mutex<Option<TrackWriters>> = Mutex::new(None);
+/// Input windows received since the tracks were opened; the recording watchdog uses it to notice
+/// audio that stopped arriving.
+static WINDOWS_WRITTEN: AtomicU64 = AtomicU64::new(0);
 
 struct TrackWriters {
     mic: WavWriter<BufWriter<File>>,
@@ -54,6 +58,7 @@ pub fn start(meeting_folder: &Path, input_sample_rate: u32) {
             if let Ok(mut tracks) = TRACKS.lock() {
                 *tracks = Some(TrackWriters { mic, system, input_sample_rate });
             }
+            WINDOWS_WRITTEN.store(0, Ordering::Release);
             info!("Track recorder: writing separate mic/system tracks to {}", meeting_folder.display());
         }
         Err(e) => warn!("Track recorder: failed to create track files: {}", e),
@@ -64,6 +69,7 @@ pub fn start(meeting_folder: &Path, input_sample_rate: u32) {
 pub fn write(device_type: &DeviceType, samples: &[f32]) {
     let Ok(mut tracks) = TRACKS.lock() else { return };
     let Some(tracks) = tracks.as_mut() else { return };
+    WINDOWS_WRITTEN.fetch_add(1, Ordering::AcqRel);
     let ratio = (tracks.input_sample_rate / TRACK_SAMPLE_RATE) as usize;
     let writer = match device_type {
         DeviceType::Microphone => &mut tracks.mic,
@@ -86,6 +92,13 @@ pub fn finish() {
         }
     }
     info!("Track recorder: tracks finalized");
+}
+
+/// How many audio windows have reached the tracks so far, or None when no tracks are being written
+/// (audio saving off), in which case progress can't be observed.
+pub fn progress() -> Option<u64> {
+    let open = TRACKS.lock().ok().is_some_and(|tracks| tracks.is_some());
+    open.then(|| WINDOWS_WRITTEN.load(Ordering::Acquire))
 }
 
 /// Paths of both tracks when a meeting has them.

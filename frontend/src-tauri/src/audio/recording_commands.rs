@@ -420,6 +420,9 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         *global_manager = Some(manager);
     }
 
+    // Stops and saves the recording if it dies silently (audio errors or capture stuck)
+    super::recording_watchdog::spawn(app.clone(), session.clone(), session_live);
+
     // Spawn background device event processor (mic-disconnect fallback).
     if let Some(receiver) = device_event_receiver {
         spawn_device_event_processor(app.clone(), receiver, session);
@@ -610,6 +613,9 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         let mut global_manager = RECORDING_MANAGER.lock().unwrap();
         *global_manager = Some(manager);
     }
+
+    // Stops and saves the recording if it dies silently (audio errors or capture stuck)
+    super::recording_watchdog::spawn(app.clone(), session.clone(), session_live);
 
     // Spawn background device event processor (mic-disconnect fallback).
     if let Some(receiver) = device_event_receiver {

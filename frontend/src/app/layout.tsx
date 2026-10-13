@@ -25,6 +25,7 @@ import { RecordingPostProcessingProvider } from '@/contexts/RecordingPostProcess
 import { ImportAudioDialog, ImportDropOverlay } from '@/components/ImportAudio'
 import { ImportDialogProvider } from '@/contexts/ImportDialogContext'
 import { MeetingSuggestionBanner } from '@/components/MeetingSuggestionBanner'
+import { RecordingInterruptionListener } from '@/components/RecordingInterruptionListener'
 import { ThemeProvider, THEME_STORAGE_KEY, useTheme } from '@/contexts/ThemeContext'
 import { isAudioExtension, getAudioFormatsDisplayList } from '@/constants/audioFormats'
 
@@ -263,6 +264,7 @@ export default function RootLayout({
                               {/* Download progress toast provider - listens for background downloads */}
                               <DownloadProgressToastProvider />
                               <MeetingSuggestionBanner />
+                              <RecordingInterruptionListener />
 
                               {/* Show onboarding or main app */}
                               {showOnboarding ? (

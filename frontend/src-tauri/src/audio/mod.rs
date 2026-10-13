@@ -40,6 +40,7 @@ pub mod playback_monitor; // NEW: Playback device detection for BT warnings
 pub mod transcription;
 pub mod diarization;
 pub mod track_recorder;
+pub mod recording_watchdog;
 
 // Shared utilities for import and retranscription
 pub(crate) mod common;
