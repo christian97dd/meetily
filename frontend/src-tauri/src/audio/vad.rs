@@ -28,6 +28,9 @@ pub struct ContinuousVadProcessor {
     in_speech: bool,
     processed_samples: usize,
     speech_start_sample: usize,
+    /// Samples of the current utterance already delivered as forced live segments. The rest is
+    /// delivered when the utterance ends (or on flush), so nothing is sent twice.
+    live_taken_samples: usize,
     // State tracking for smart logging
     last_logged_state: bool,
 }
@@ -82,6 +85,7 @@ impl ContinuousVadProcessor {
             in_speech: false,
             processed_samples: 0,
             speech_start_sample: 0,
+            live_taken_samples: 0,
             // Initialize state tracking
             last_logged_state: false,
         })
@@ -209,9 +213,11 @@ impl ContinuousVadProcessor {
                     real_sample_count
                 ));
             }
-            let samples = active_speech[..real_sample_count].to_vec();
+            // Forced live segments already delivered the start of this utterance
+            let taken = std::mem::take(&mut self.live_taken_samples).min(real_sample_count);
+            let samples = active_speech[taken..real_sample_count].to_vec();
             let start_ms =
-                (self.speech_start_sample as f64 / VAD_SAMPLE_RATE as f64) * 1000.0;
+                ((self.speech_start_sample + taken) as f64 / VAD_SAMPLE_RATE as f64) * 1000.0;
             let end_ms = (real_end_sample as f64 / VAD_SAMPLE_RATE as f64) * 1000.0;
 
             debug!("VAD flush: Force-ending speech - start={}ms, end={}ms, duration={}ms, samples={}",
@@ -237,10 +243,12 @@ impl ContinuousVadProcessor {
         Ok(completed_segments)
     }
 
-    /// Take one bounded prefix of an active live segment once it reaches the
-    /// target duration. The VAD session remains in speech state, and its
-    /// absolute buffer is advanced with `take_until`, so the next forced or
-    /// natural segment starts exactly where this one ended.
+    /// Take the next bounded piece of an active utterance once it reaches the target duration.
+    ///
+    /// Reads silero's active speech without modifying its session: trimming the session buffer
+    /// (`take_until`) left silero holding the utterance's original start, so when the utterance
+    /// later ended it asked for audio that was gone and panicked, killing the live pipeline. The
+    /// delivered part is tracked in `live_taken_samples` and skipped when the utterance ends.
     pub fn take_live_segment_if_ready(
         &mut self,
         target_duration_ms: u32,
@@ -250,39 +258,25 @@ impl ContinuousVadProcessor {
             return Ok(None);
         }
 
-        let active_samples = self.session.current_speech_samples();
+        let active = self.session.get_current_speech();
+        let untaken = active.len().saturating_sub(self.live_taken_samples);
         let Some((start_sample, end_sample)) = live_segment_bounds(
-            self.speech_start_sample,
-            active_samples,
+            self.speech_start_sample + self.live_taken_samples,
+            untaken,
             target_duration_ms,
             hard_max_duration_ms,
         )? else {
             return Ok(None);
         };
 
-        let start_ms = start_sample * 1000 / VAD_SAMPLE_RATE as usize;
-        let end_ms = end_sample * 1000 / VAD_SAMPLE_RATE as usize;
-
-        let samples = self
-            .session
-            .get_speech(start_ms, Some(end_ms))
-            .to_vec();
-        if samples.is_empty() {
-            return Ok(None);
-        }
-
-        // Advance the canonical session buffer. This also updates Silero's
-        // active start, keeping future segments contiguous with no overlap.
-        let _ = self
-            .session
-            .take_until(Duration::from_millis(end_ms as u64));
-        self.speech_start_sample = end_ms * VAD_SAMPLE_RATE as usize / 1000;
-        self.current_speech = self.session.get_current_speech().to_vec();
+        let offset = self.live_taken_samples;
+        let samples = active[offset..offset + (end_sample - start_sample)].to_vec();
+        self.live_taken_samples += samples.len();
 
         Ok(Some(SpeechSegment {
             samples,
-            start_timestamp_ms: start_ms as f64,
-            end_timestamp_ms: end_ms as f64,
+            start_timestamp_ms: start_sample as f64 * 1000.0 / VAD_SAMPLE_RATE as f64,
+            end_timestamp_ms: end_sample as f64 * 1000.0 / VAD_SAMPLE_RATE as f64,
             confidence: 0.8,
         }))
     }
@@ -324,6 +318,7 @@ impl ContinuousVadProcessor {
                     // surfaced once per recording, on the final segment — which landed at
                     // ~2x the file duration and sorted to the end of the transcript.
                     self.speech_start_sample = timestamp_ms * VAD_SAMPLE_RATE as usize / 1000;
+                    self.live_taken_samples = 0;
                     self.current_speech.clear();
                 }
                 VadTransition::SpeechEnd { start_timestamp_ms, end_timestamp_ms, samples } => {
@@ -335,22 +330,26 @@ impl ContinuousVadProcessor {
                     self.in_speech = false;
 
                     // Use samples from VAD transition if available, otherwise use accumulated samples
-                    let speech_samples = if !samples.is_empty() {
+                    let mut speech_samples = if !samples.is_empty() {
                         samples
                     } else {
                         self.current_speech.clone()
                     };
+                    // Forced live segments already delivered the start of this utterance
+                    let taken = std::mem::take(&mut self.live_taken_samples).min(speech_samples.len());
+                    speech_samples.drain(..taken);
+                    let start_timestamp_ms = start_timestamp_ms as f64 + taken as f64 * 1000.0 / VAD_SAMPLE_RATE as f64;
 
                     if !speech_samples.is_empty() {
                         let segment = SpeechSegment {
                             samples: speech_samples,
-                            start_timestamp_ms: start_timestamp_ms as f64,
+                            start_timestamp_ms,
                             end_timestamp_ms: end_timestamp_ms as f64,
                             confidence: 0.9, // VAD confidence
                         };
 
                         info!("VAD: Completed speech segment: {:.1}ms duration, {} samples",
-                              end_timestamp_ms - start_timestamp_ms, segment.samples.len());
+                              end_timestamp_ms as f64 - start_timestamp_ms, segment.samples.len());
 
                         self.speech_segments.push_back(segment);
                     }
@@ -856,6 +855,44 @@ mod tests {
         assert_eq!(second.start_timestamp_ms, first.end_timestamp_ms);
         assert_eq!(second.end_timestamp_ms - second.start_timestamp_ms, 500.0);
         assert!(second.end_timestamp_ms <= second.start_timestamp_ms + 1000.0);
+    }
+
+    /// Regression: a live segment forced out of an utterance that then ends on its own must not
+    /// panic. Trimming silero's session buffer for the forced cut left silero holding the
+    /// utterance's original start, so the natural end asked for audio that was already gone
+    /// ("Duration … is outside of session audio range") and killed the live pipeline.
+    #[test]
+    fn test_utterance_ending_after_a_forced_live_segment_does_not_panic() {
+        // Speech bursts of 5s separated by 5s of silence, long enough for the 2s redemption to end them
+        let mut audio = generate_late_speech_audio(1.0, 10.0, 16000);
+        audio.extend(vec![0.0f32; 16000 * 5]);
+        let mut processor = ContinuousVadProcessor::new(16000, 2000).expect("Failed to create processor");
+
+        let mut segments = Vec::new();
+        for window in audio.chunks(9600) {
+            segments.extend(processor.process_audio(window).expect("process_audio failed"));
+            // Small bounds force a cut inside each 5s utterance, like the 20/25s ones do in a long one
+            while let Some(segment) = processor.take_live_segment_if_ready(1000, 2000).expect("live take failed") {
+                segments.push(segment);
+            }
+        }
+        segments.extend(processor.flush().expect("flush failed"));
+
+        assert!(segments.len() >= 2, "expected forced and natural segments, got {}", segments.len());
+        let mut sorted = segments.clone();
+        sorted.sort_by(|a, b| a.start_timestamp_ms.total_cmp(&b.start_timestamp_ms));
+        for pair in sorted.windows(2) {
+            assert!(
+                pair[1].start_timestamp_ms >= pair[0].end_timestamp_ms - 1.0,
+                "segments overlap: {:?} then {:?}",
+                (pair[0].start_timestamp_ms, pair[0].end_timestamp_ms),
+                (pair[1].start_timestamp_ms, pair[1].end_timestamp_ms)
+            );
+        }
+        for segment in &segments {
+            let expected = ((segment.end_timestamp_ms - segment.start_timestamp_ms) / 1000.0 * 16000.0).round() as i64;
+            assert!((segment.samples.len() as i64 - expected).abs() <= 480, "samples don't match the segment's span");
+        }
     }
 
     fn generate_continuous_speech_audio(duration_seconds: f32, sample_rate: u32) -> Vec<f32> {
