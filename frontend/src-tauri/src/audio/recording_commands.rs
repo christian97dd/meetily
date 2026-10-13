@@ -313,6 +313,9 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         meeting_name
     );
 
+    // Recording has priority over a background re-transcription; a scheduled one retries later
+    super::retranscription::cancel_and_wait(std::time::Duration::from_secs(15)).await;
+
     let engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
 
     // Check if already recording
@@ -503,6 +506,9 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         "Starting recording with specific devices: mic={:?}, system={:?}, meeting={:?}",
         mic_device_name, system_device_name, meeting_name
     );
+
+    // Recording has priority over a background re-transcription; a scheduled one retries later
+    super::retranscription::cancel_and_wait(std::time::Duration::from_secs(15)).await;
 
     let engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
 
