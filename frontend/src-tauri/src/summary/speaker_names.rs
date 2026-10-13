@@ -25,7 +25,7 @@ const CONTEXT_LINES: usize = 2;
 /// Keeps the prompt within small local models' context windows.
 const MAX_PROMPT_LINES: usize = 80;
 /// The calendar event may have started a bit before the recording or ended after it.
-const CALENDAR_SLACK_SECS: f64 = 10.0 * 60.0;
+pub(crate) const CALENDAR_SLACK_SECS: f64 = 10.0 * 60.0;
 
 const STORE_FILE: &str = "speaker-names.json";
 const STORE_KEY: &str = "settings";

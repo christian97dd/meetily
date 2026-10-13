@@ -5,6 +5,7 @@ use crate::audio::vad::get_speech_chunks_with_progress;
 use super::common::{create_transcript_segments, split_segment_at_silence, write_transcripts_json};
 use super::constants::AUDIO_EXTENSIONS;
 use crate::config::{DEFAULT_WHISPER_MODEL, DEFAULT_PARAKEET_MODEL};
+use crate::database::repositories::meeting::MeetingsRepository;
 use crate::parakeet_engine::ParakeetEngine;
 use crate::state::AppState;
 use crate::whisper_engine::WhisperEngine;
@@ -448,6 +449,23 @@ async fn run_retranscription<R: Runtime>(
     if all_transcripts.is_empty() {
         warn!("No speech detected in audio");
         return Err(anyhow!("No speech detected in audio file"));
+    }
+    if let Some(voices) = diarizer.map(super::diarization::RecordingDiarizer::finish) {
+        let remote_invitees = match app.try_state::<AppState>() {
+            Some(state) => match MeetingsRepository::get_meeting_metadata(state.db_manager.pool(), &meeting_id).await {
+                Ok(Some(meeting)) => {
+                    super::diarization::remote_invitees(&app, meeting.created_at.0.timestamp() as f64, duration_seconds).await
+                }
+                _ => None,
+            },
+            None => None,
+        };
+        let merges = voices.merges(remote_invitees);
+        for (_, _, _, speaker) in all_transcripts.iter_mut() {
+            if let Some(merged) = speaker.as_ref().and_then(|key| merges.get(key)) {
+                *speaker = Some(merged.clone());
+            }
+        }
     }
     // Both tracks share one timeline; interleave them back into conversation order
     all_transcripts.sort_by(|a, b| a.1.total_cmp(&b.1));

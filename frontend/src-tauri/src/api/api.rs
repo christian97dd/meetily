@@ -984,7 +984,7 @@ pub async fn api_save_transcript<R: Runtime>(
     }
 
     // Convert serde_json::Value to TranscriptSegment
-    let transcripts_to_save: Vec<TranscriptSegment> = transcripts
+    let mut transcripts_to_save: Vec<TranscriptSegment> = transcripts
         .into_iter()
         .map(serde_json::from_value)
         .collect::<Result<Vec<_>, _>>()
@@ -1000,6 +1000,19 @@ pub async fn api_save_transcript<R: Runtime>(
                    first_seg.audio_start_time,
                    first_seg.audio_end_time,
                    first_seg.duration);
+    }
+
+    // The recording just ended: merge remote voices that turned out to be the same person
+    if let Some(voices) = crate::audio::diarization::take_finished_session() {
+        let duration = transcripts_to_save.iter().filter_map(|t| t.audio_end_time).fold(0.0, f64::max);
+        let remote_invitees =
+            crate::audio::diarization::remote_invitees(&_app, chrono::Utc::now().timestamp() as f64, duration).await;
+        let merges = voices.merges(remote_invitees);
+        for segment in transcripts_to_save.iter_mut() {
+            if let Some(merged) = segment.speaker.as_ref().and_then(|key| merges.get(key)) {
+                segment.speaker = Some(merged.clone());
+            }
+        }
     }
 
     let pool = state.db_manager.pool();

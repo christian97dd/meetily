@@ -4,7 +4,12 @@
 //!
 //! Each VAD segment is treated as a single speaker: they are short speech bursts, and overlaps are rare
 //! enough in calls that per-segment matching beats running a separate segmentation model.
+//!
+//! Matching happens as the audio arrives, so a person whose audio changes mid-call (codec, mic,
+//! distance) can be split into two voices. Once the whole recording was heard, voices that turn out
+//! to be one person are merged.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
@@ -25,15 +30,23 @@ const MIN_NEW_SPEAKER_SAMPLES: usize = 40_000;
 /// so the same person rarely scores as high as on clean recordings.
 const SAME_SPEAKER_SIMILARITY: f32 = 0.4;
 const MAX_SPEAKERS: usize = 10;
+/// Averaged over a whole voice, the same person split in two scored 0.46-0.60 on real calls and
+/// different people up to ~0.4. Above this, two voices are one person.
+const SAME_VOICE_SIMILARITY: f32 = 0.5;
+/// Pairs between this and `SAME_VOICE_SIMILARITY` are doubtful: merged only while there are more
+/// voices than remote invitees, so someone who joined uninvited still keeps their own voice.
+const DOUBTFUL_VOICE_SIMILARITY: f32 = 0.4;
 
 /// Known voices of one recording, each kept as the running mean of its (unit-length) embeddings.
+/// `members` keeps the embeddings each voice was built from, for the final merge.
 struct SpeakerRegistry {
     centroids: Vec<(Vec<f32>, u32)>,
+    members: Vec<Vec<Vec<f32>>>,
 }
 
 impl SpeakerRegistry {
     fn new() -> Self {
-        Self { centroids: Vec::new() }
+        Self { centroids: Vec::new(), members: Vec::new() }
     }
 
     /// 1-based speaker id for `embedding`. `may_create` allows registering a new voice when none is similar.
@@ -49,7 +62,8 @@ impl SpeakerRegistry {
         let index = match best {
             Some((index, similarity)) if similarity >= SAME_SPEAKER_SIMILARITY => index,
             _ if may_create && self.centroids.len() < MAX_SPEAKERS => {
-                self.centroids.push((embedding, 1));
+                self.centroids.push((embedding.clone(), 1));
+                self.members.push(vec![embedding]);
                 return Some(self.centroids.len());
             }
             // Not allowed to create (short segment or full): the closest voice is the best guess
@@ -63,8 +77,86 @@ impl SpeakerRegistry {
         for (c, e) in centroid.iter_mut().zip(&embedding) {
             *c += (e - *c) * weight;
         }
+        self.members[index].push(embedding);
         Some(index + 1)
     }
+}
+
+/// New 1-based id for each voice (by index) after merging the ones that are the same person.
+/// Merges the most similar pair first; ids stay in order of first appearance.
+fn merge_plan(voices: &[Vec<Vec<f32>>], remote_invitees: Option<usize>) -> Vec<usize> {
+    let sum = |embeddings: &[Vec<f32>]| {
+        let mut total = vec![0.0f32; embeddings.first().map_or(0, Vec::len)];
+        for embedding in embeddings {
+            for (t, e) in total.iter_mut().zip(embedding) {
+                *t += e;
+            }
+        }
+        total
+    };
+    // Each group: the voices it holds and the sum of all their embeddings
+    let mut groups: Vec<(Vec<usize>, Vec<f32>)> =
+        voices.iter().enumerate().map(|(index, embeddings)| (vec![index], sum(embeddings))).collect();
+
+    loop {
+        let mut best: Option<(usize, usize, f32)> = None;
+        for a in 0..groups.len() {
+            let Some(mean_a) = normalized(&groups[a].1) else { continue };
+            for b in a + 1..groups.len() {
+                let similarity = cosine(&mean_a, &groups[b].1);
+                if best.map_or(true, |(_, _, s)| similarity > s) {
+                    best = Some((a, b, similarity));
+                }
+            }
+        }
+        let Some((a, b, similarity)) = best else { break };
+        let too_many = remote_invitees.is_some_and(|invitees| groups.len() > invitees);
+        if similarity < SAME_VOICE_SIMILARITY && !(too_many && similarity >= DOUBTFUL_VOICE_SIMILARITY) {
+            break;
+        }
+        let (voices_b, sum_b) = groups.remove(b);
+        groups[a].0.extend(voices_b);
+        for (t, e) in groups[a].1.iter_mut().zip(&sum_b) {
+            *t += e;
+        }
+    }
+
+    let mut new_ids = vec![0; voices.len()];
+    for (group_index, (members, _)) in groups.iter().enumerate() {
+        for &voice in members {
+            new_ids[voice] = group_index + 1;
+        }
+    }
+    new_ids
+}
+
+/// All the voices of a finished recording, ready to be merged.
+pub struct FinishedVoices(SpeakerRegistry);
+
+impl FinishedVoices {
+    /// Old speaker key -> merged key, only for the keys that change. `remote_invitees` comes from
+    /// the calendar and only settles doubtful pairs.
+    pub fn merges(&self, remote_invitees: Option<usize>) -> HashMap<String, String> {
+        let new_ids = merge_plan(&self.0.members, remote_invitees);
+        let merges: HashMap<String, String> = new_ids
+            .iter()
+            .enumerate()
+            .filter(|(index, new_id)| index + 1 != **new_id)
+            .map(|(index, new_id)| (speaker_key(Some(index + 1)), speaker_key(Some(*new_id))))
+            .collect();
+        let remaining = new_ids.iter().max().copied().unwrap_or(0);
+        if remaining < new_ids.len() {
+            info!("Diarization: merged {} remote voices into {}", new_ids.len(), remaining);
+        }
+        merges
+    }
+}
+
+/// Remote people invited to the calendar event around a recording, when calendar naming is on.
+pub async fn remote_invitees<R: Runtime>(app: &AppHandle<R>, end_unix: f64, duration_secs: f64) -> Option<usize> {
+    let slack = crate::summary::speaker_names::CALENDAR_SLACK_SECS;
+    let attendees = crate::calendar::attendees_between(app, end_unix - duration_secs - slack, end_unix + slack).await?;
+    (!attendees.others.is_empty()).then_some(attendees.others.len())
 }
 
 fn normalized(v: &[f32]) -> Option<Vec<f32>> {
@@ -81,6 +173,8 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 
 static MODEL_PATH: OnceLock<PathBuf> = OnceLock::new();
 static SESSION: Mutex<Option<RecordingDiarizer>> = Mutex::new(None);
+/// Voices of the last live recording, kept from its end until its transcript is saved.
+static FINISHED_SESSION: Mutex<Option<FinishedVoices>> = Mutex::new(None);
 
 /// Voices of one recording. The live pipeline keeps one in `SESSION`; batch re-transcription creates its own.
 pub struct RecordingDiarizer {
@@ -105,6 +199,10 @@ impl RecordingDiarizer {
     /// Speaker key for a system-audio segment: "system-N", or "system" when voices can't be told apart.
     pub fn speaker_key(&mut self, samples: &[f32]) -> String {
         speaker_key(self.speaker_for(samples))
+    }
+
+    pub fn finish(self) -> FinishedVoices {
+        FinishedVoices(self.speakers)
     }
 
     fn speaker_for(&mut self, samples: &[f32]) -> Option<usize> {
@@ -168,15 +266,24 @@ async fn download_model(path: &PathBuf) -> Result<(), String> {
 pub fn start_session() {
     let diarizer = RecordingDiarizer::load();
     info!("Diarization: {}", if diarizer.is_some() { "enabled for this recording" } else { "unavailable" });
+    if let Ok(mut finished) = FINISHED_SESSION.lock() {
+        *finished = None;
+    }
     if let Ok(mut session) = SESSION.lock() {
         *session = diarizer;
     }
 }
 
 pub fn end_session() {
-    if let Ok(mut session) = SESSION.lock() {
-        *session = None;
+    let diarizer = SESSION.lock().ok().and_then(|mut session| session.take());
+    if let Ok(mut finished) = FINISHED_SESSION.lock() {
+        *finished = diarizer.map(RecordingDiarizer::finish);
     }
+}
+
+/// Voices of the live recording that just ended; taken once, by whoever saves its transcript.
+pub fn take_finished_session() -> Option<FinishedVoices> {
+    FINISHED_SESSION.lock().ok()?.take()
 }
 
 /// Speaker key for a system-audio segment: "system-N", or "system" when voices can't be told apart.
@@ -241,5 +348,56 @@ mod tests {
         extra[MAX_SPEAKERS] = 1.0;
         assert!(registry.assign(&extra, true).unwrap() <= MAX_SPEAKERS);
         assert_eq!(registry.centroids.len(), MAX_SPEAKERS);
+    }
+
+    /// Unit vector at `similarity` cosine from [1, 0, 0].
+    fn at(similarity: f32) -> Vec<f32> {
+        vec![similarity, (1.0 - similarity * similarity).sqrt(), 0.0]
+    }
+
+    #[test]
+    fn one_person_split_in_two_voices_is_merged_back() {
+        let voices = vec![vec![at(1.0), at(0.95)], vec![at(0.6), at(0.65)]];
+        assert_eq!(merge_plan(&voices, None), vec![1, 1]);
+    }
+
+    #[test]
+    fn different_people_are_never_merged_even_above_the_invitee_count() {
+        let voices = vec![vec![at(1.0)], vec![at(0.2)], vec![vec![0.0, 0.0, 1.0]]];
+        assert_eq!(merge_plan(&voices, None), vec![1, 2, 3]);
+        assert_eq!(merge_plan(&voices, Some(1)), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn doubtful_voices_are_merged_only_while_there_are_more_than_invitees() {
+        let voices = vec![vec![at(1.0)], vec![at(0.45)]];
+        assert_eq!(merge_plan(&voices, None), vec![1, 2]);
+        assert_eq!(merge_plan(&voices, Some(2)), vec![1, 2]);
+        assert_eq!(merge_plan(&voices, Some(1)), vec![1, 1]);
+    }
+
+    #[test]
+    fn merged_ids_follow_the_order_voices_first_appeared() {
+        let voices = vec![vec![at(1.0)], vec![vec![0.0, 0.0, 1.0]], vec![at(0.9)], vec![vec![0.0, 0.1, 1.0]]];
+        assert_eq!(merge_plan(&voices, None), vec![1, 2, 1, 2]);
+    }
+
+    #[test]
+    fn merges_only_list_the_speaker_keys_that_change() {
+        let mut registry = SpeakerRegistry::new();
+        registry.assign(&at(1.0), true);
+        registry.assign(&vec![0.0, 0.0, 1.0], true);
+        registry.members.push(vec![at(0.9)]);
+        let merges = FinishedVoices(registry).merges(None);
+        assert_eq!(merges, HashMap::from([("system-3".to_string(), "system-1".to_string())]));
+    }
+
+    #[test]
+    fn every_embedding_a_voice_is_built_from_is_kept() {
+        let mut registry = SpeakerRegistry::new();
+        registry.assign(&voice(0.0, 0.0), true);
+        registry.assign(&voice(0.0, 0.3), true);
+        registry.assign(&[1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0], true);
+        assert_eq!(registry.members.iter().map(Vec::len).collect::<Vec<_>>(), vec![2, 1]);
     }
 }
