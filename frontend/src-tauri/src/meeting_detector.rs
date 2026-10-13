@@ -6,6 +6,8 @@
 //! is detected no matter which tab or window it runs in. The detector only stops recordings it
 //! started itself; manual recordings are never touched.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +19,11 @@ const STORE_FILE: &str = "meeting-detection.json";
 const STORE_KEY: &str = "settings";
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// While recording, CoreAudio is only asked in auto mode (to notice the meeting ending), and less often:
+/// each query walks every audio process through CoreAudio's lock, which the capture also needs.
+const RECORDING_QUERY_INTERVAL: Duration = Duration::from_secs(10);
+/// A query stuck this long is abandoned; the detector keeps the last known state instead of waiting.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Mic must stay busy this long before recording, so a quick mic test or a dictation doesn't count.
 const START_AFTER: Duration = Duration::from_secs(6);
 /// Mic must stay free this long before stopping, so rejoining a call or switching devices doesn't cut it.
@@ -161,6 +168,16 @@ impl AutoRecordState {
     }
 }
 
+/// Whether to ask CoreAudio which apps hold the mic on this poll.
+fn should_query(mode: DetectionMode, is_recording: bool, since_last_query: Option<Duration>) -> bool {
+    match (is_recording, mode) {
+        (_, DetectionMode::Off) => false,
+        (false, _) => true,
+        (true, DetectionMode::Auto) => since_last_query.map_or(true, |elapsed| elapsed >= RECORDING_QUERY_INTERVAL),
+        (true, DetectionMode::Suggest) => false,
+    }
+}
+
 pub fn is_meeting_app(bundle_id: &str) -> bool {
     MEETING_APP_BUNDLE_PREFIXES.iter().any(|prefix| bundle_id.starts_with(prefix))
 }
@@ -221,6 +238,9 @@ pub fn spawn<R: Runtime>(app: AppHandle<R>) {
         let mut state = AutoRecordState::default();
         let mut suggestion_shown = false;
         let mut interval = tokio::time::interval(POLL_INTERVAL);
+        let mut apps: Vec<String> = Vec::new();
+        let mut last_query: Option<Instant> = None;
+        let query_in_flight = Arc::new(AtomicBool::new(false));
 
         loop {
             interval.tick().await;
@@ -228,11 +248,27 @@ pub fn spawn<R: Runtime>(app: AppHandle<R>) {
             let mode = load_settings(&app).effective_mode();
             if mode == DetectionMode::Off {
                 state = AutoRecordState::default();
+                apps.clear();
                 continue;
             }
 
-            let apps = tokio::task::spawn_blocking(meeting_apps_using_mic).await.unwrap_or_default();
             let is_recording = crate::audio::recording_commands::is_recording().await;
+            let due = should_query(mode, is_recording, last_query.map(|t| t.elapsed()));
+            // Never pile up queries: if CoreAudio hasn't answered the previous one, keep the last known state
+            if due && !query_in_flight.swap(true, Ordering::AcqRel) {
+                last_query = Some(Instant::now());
+                let in_flight = query_in_flight.clone();
+                let query = tokio::task::spawn_blocking(move || {
+                    let apps = meeting_apps_using_mic();
+                    in_flight.store(false, Ordering::Release);
+                    apps
+                });
+                match tokio::time::timeout(QUERY_TIMEOUT, query).await {
+                    Ok(Ok(found)) => apps = found,
+                    Ok(Err(_)) => query_in_flight.store(false, Ordering::Release),
+                    Err(_) => log::warn!("Meeting detector: CoreAudio didn't answer in {:?}, keeping the last known state", QUERY_TIMEOUT),
+                }
+            }
 
             if suggestion_shown && (apps.is_empty() || is_recording) {
                 suggestion_shown = false;
@@ -401,6 +437,17 @@ mod tests {
         let current: MeetingDetectionSettings = serde_json::from_str(r#"{"mode":"suggest"}"#).unwrap();
         assert_eq!(current.effective_mode(), DetectionMode::Suggest);
         assert_eq!(MeetingDetectionSettings::default().effective_mode(), DetectionMode::Off);
+    }
+
+    #[test]
+    fn coreaudio_is_left_alone_while_recording_unless_auto_mode_needs_the_meeting_end() {
+        assert!(should_query(DetectionMode::Suggest, false, None));
+        assert!(should_query(DetectionMode::Auto, false, Some(Duration::from_secs(1))));
+        assert!(!should_query(DetectionMode::Suggest, true, None));
+        assert!(!should_query(DetectionMode::Off, false, None));
+        assert!(should_query(DetectionMode::Auto, true, None));
+        assert!(!should_query(DetectionMode::Auto, true, Some(Duration::from_secs(9))));
+        assert!(should_query(DetectionMode::Auto, true, Some(Duration::from_secs(10))));
     }
 
     #[test]
