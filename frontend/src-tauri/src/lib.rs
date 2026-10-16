@@ -842,6 +842,7 @@ pub fn run() {
             // Onboarding commands
             onboarding::get_onboarding_status,
             meeting_detector::get_meeting_detection_settings,
+            meeting_detector::keep_recording_after_meeting_end,
             calendar::get_calendar_naming_settings,
             calendar::set_calendar_naming_enabled,
             calendar::get_current_calendar_event_title,

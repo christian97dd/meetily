@@ -19,8 +19,8 @@ interface MeetingDetectionSettings {
 
 const DETECTION_MODE_HINTS: Record<MeetingDetectionMode, string> = {
   off: 'Recording only starts when you press the record button',
-  suggest: 'When a browser or meeting app (Meet, Zoom, Teams...) turns the microphone on, shows a notification and a Record button',
-  auto: 'Starts recording when a meeting app turns the microphone on, and stops when it releases it',
+  suggest: 'When a browser or meeting app (Meet, Zoom, Teams...) turns the microphone on, shows a notification and a Record button. A recording started from it stops 10 s after the meeting ends, unless you keep it',
+  auto: 'Starts recording when a meeting app turns the microphone on, and stops 10 s after it releases it, unless you keep it',
 };
 
 function MeetingDetectionSelect() {

@@ -26,6 +26,7 @@ import { ImportAudioDialog, ImportDropOverlay } from '@/components/ImportAudio'
 import { ImportDialogProvider } from '@/contexts/ImportDialogContext'
 import { MeetingSuggestionBanner } from '@/components/MeetingSuggestionBanner'
 import { RecordingInterruptionListener } from '@/components/RecordingInterruptionListener'
+import { MeetingEndCountdown } from '@/components/MeetingEndCountdown'
 import { ThemeProvider, THEME_STORAGE_KEY, useTheme } from '@/contexts/ThemeContext'
 import { isAudioExtension, getAudioFormatsDisplayList } from '@/constants/audioFormats'
 
@@ -265,6 +266,7 @@ export default function RootLayout({
                               <DownloadProgressToastProvider />
                               <MeetingSuggestionBanner />
                               <RecordingInterruptionListener />
+                              <MeetingEndCountdown />
 
                               {/* Show onboarding or main app */}
                               {showOnboarding ? (

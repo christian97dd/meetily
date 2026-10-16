@@ -1,10 +1,11 @@
 //! Detects meetings: when a meeting app (browser, Zoom, Teams...) keeps the microphone open it either
-//! suggests recording (notification + in-app banner) or, in auto mode, starts a recording and stops it
-//! once the app releases the microphone.
+//! suggests recording (notification + in-app banner) or, in auto mode, starts a recording. Either
+//! way, once the app releases the microphone the recording stops after a short countdown the user
+//! can cancel.
 //!
 //! "Meeting app using the mic" is read from CoreAudio's per-process state (macOS 14.2+), so a call
 //! is detected no matter which tab or window it runs in. The detector only stops recordings it
-//! started itself; manual recordings are never touched.
+//! started itself or that the user started from its suggestion; manual recordings are never touched.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -30,6 +31,11 @@ const START_AFTER: Duration = Duration::from_secs(6);
 const STOP_AFTER: Duration = Duration::from_secs(20);
 /// If the frontend hasn't started recording by then (model not ready, error), give up until the meeting ends.
 const START_TIMEOUT: Duration = Duration::from_secs(30);
+/// Once the meeting ended, how long the user has to keep recording before it stops.
+const STOP_COUNTDOWN: Duration = Duration::from_secs(10);
+
+/// Set by the user during the stop countdown to keep the recording going.
+static KEEP_RECORDING: AtomicBool = AtomicBool::new(false);
 
 /// Bundle id prefixes of apps whose mic usage means "in a meeting". Browsers cover Google Meet;
 /// Safari captures audio from the shared WebKit GPU process, hence `com.apple.WebKit`.
@@ -86,6 +92,9 @@ pub enum DetectorAction {
 enum Phase {
     Idle,
     Starting(Instant),
+    /// Recording was suggested to the user, who may still start it from the suggestion.
+    Offered,
+    /// A recording to stop when the meeting ends: started by us or from our suggestion.
     AutoRecording,
     /// A recording the user started (or one we already handed back); never stopped by us.
     ManualRecording,
@@ -129,6 +138,13 @@ impl AutoRecordState {
                     return Some(DetectorAction::StartRecording);
                 }
             }
+            Phase::Offered => {
+                if is_recording {
+                    self.phase = Phase::AutoRecording;
+                } else if !meeting_mic_busy {
+                    self.phase = Phase::Idle;
+                }
+            }
             Phase::Starting(requested_at) => {
                 if is_recording {
                     self.phase = Phase::AutoRecording;
@@ -161,20 +177,51 @@ impl AutoRecordState {
         None
     }
 
-    /// The start was offered to the user instead of performed: don't offer it again until the meeting
-    /// ends, and treat a recording the user starts as manual (never auto-stopped).
+    /// The start was offered to the user instead of performed: don't offer it again during this meeting,
+    /// and stop a recording the user starts from it once the meeting ends.
     pub fn start_handed_to_user(&mut self) {
-        self.phase = Phase::WaitForMeetingEnd;
+        self.phase = Phase::Offered;
+    }
+
+    pub fn watching_meeting_end(&self) -> bool {
+        self.phase == Phase::AutoRecording
     }
 }
 
 /// Whether to ask CoreAudio which apps hold the mic on this poll.
-fn should_query(mode: DetectionMode, is_recording: bool, since_last_query: Option<Duration>) -> bool {
+fn should_query(
+    mode: DetectionMode,
+    is_recording: bool,
+    watching_meeting_end: bool,
+    since_last_query: Option<Duration>,
+) -> bool {
     match (is_recording, mode) {
         (_, DetectionMode::Off) => false,
         (false, _) => true,
-        (true, DetectionMode::Auto) => since_last_query.map_or(true, |elapsed| elapsed >= RECORDING_QUERY_INTERVAL),
-        (true, DetectionMode::Suggest) => false,
+        (true, _) => {
+            watching_meeting_end && since_last_query.map_or(true, |elapsed| elapsed >= RECORDING_QUERY_INTERVAL)
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum CountdownOutcome {
+    Waiting,
+    Stop,
+    KeptByUser,
+    /// The user stopped the recording during the countdown
+    AlreadyStopped,
+}
+
+fn countdown_outcome(now: Instant, deadline: Instant, is_recording: bool, keep_requested: bool) -> CountdownOutcome {
+    if !is_recording {
+        CountdownOutcome::AlreadyStopped
+    } else if keep_requested {
+        CountdownOutcome::KeptByUser
+    } else if now >= deadline {
+        CountdownOutcome::Stop
+    } else {
+        CountdownOutcome::Waiting
     }
 }
 
@@ -210,12 +257,16 @@ fn meeting_apps_using_mic() -> Vec<String> {
     Vec::new()
 }
 
+/// Never configured: suggest, which records nothing unless the user accepts.
+fn settings_from(stored: Option<serde_json::Value>) -> MeetingDetectionSettings {
+    match stored {
+        Some(value) => serde_json::from_value(value).unwrap_or_default(),
+        None => MeetingDetectionSettings { mode: DetectionMode::Suggest, ..Default::default() },
+    }
+}
+
 pub fn load_settings<R: Runtime>(app: &AppHandle<R>) -> MeetingDetectionSettings {
-    app.store(STORE_FILE)
-        .ok()
-        .and_then(|store| store.get(STORE_KEY))
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default()
+    settings_from(app.store(STORE_FILE).ok().and_then(|store| store.get(STORE_KEY)))
 }
 
 fn suggest_recording<R: Runtime>(app: &AppHandle<R>, apps: &[String]) {
@@ -241,6 +292,7 @@ pub fn spawn<R: Runtime>(app: AppHandle<R>) {
         let mut apps: Vec<String> = Vec::new();
         let mut last_query: Option<Instant> = None;
         let query_in_flight = Arc::new(AtomicBool::new(false));
+        let mut stop_deadline: Option<Instant> = None;
 
         loop {
             interval.tick().await;
@@ -249,11 +301,33 @@ pub fn spawn<R: Runtime>(app: AppHandle<R>) {
             if mode == DetectionMode::Off {
                 state = AutoRecordState::default();
                 apps.clear();
+                if stop_deadline.take().is_some() {
+                    let _ = app.emit("meeting-end-stop-cancelled", ());
+                }
                 continue;
             }
 
             let is_recording = crate::audio::recording_commands::is_recording().await;
-            let due = should_query(mode, is_recording, last_query.map(|t| t.elapsed()));
+
+            if let Some(deadline) = stop_deadline {
+                let keep = KEEP_RECORDING.swap(false, Ordering::AcqRel);
+                match countdown_outcome(Instant::now(), deadline, is_recording, keep) {
+                    CountdownOutcome::Waiting => {}
+                    CountdownOutcome::Stop => {
+                        stop_deadline = None;
+                        log::info!("Meeting detector: meeting ended, stopping recording");
+                        crate::tray::stop_recording_and_save(&app, "Meeting detector").await;
+                        continue;
+                    }
+                    outcome => {
+                        stop_deadline = None;
+                        log::info!("Meeting detector: stop countdown ended without stopping ({:?})", outcome);
+                        let _ = app.emit("meeting-end-stop-cancelled", ());
+                    }
+                }
+            }
+
+            let due = should_query(mode, is_recording, state.watching_meeting_end(), last_query.map(|t| t.elapsed()));
             // Never pile up queries: if CoreAudio hasn't answered the previous one, keep the last known state
             if due && !query_in_flight.swap(true, Ordering::AcqRel) {
                 last_query = Some(Instant::now());
@@ -290,13 +364,30 @@ pub fn spawn<R: Runtime>(app: AppHandle<R>) {
                     }
                 }
                 Some(DetectorAction::StopRecording) => {
-                    log::info!("Meeting detector: microphone released, stopping recording");
-                    crate::tray::stop_recording_and_save(&app, "Meeting detector").await;
+                    log::info!("Meeting detector: microphone released, stopping recording in {:?} unless kept", STOP_COUNTDOWN);
+                    KEEP_RECORDING.store(false, Ordering::Release);
+                    stop_deadline = Some(Instant::now() + STOP_COUNTDOWN);
+                    let _ = app.emit("meeting-ended-stopping", STOP_COUNTDOWN.as_secs());
+                    if let Err(e) = app
+                        .notification()
+                        .builder()
+                        .title("Meeting ended")
+                        .body(format!("meetily stops recording in {} s. Open it to keep recording.", STOP_COUNTDOWN.as_secs()))
+                        .show()
+                    {
+                        log::warn!("Meeting detector: failed to show notification: {}", e);
+                    }
                 }
                 None => {}
             }
         }
     });
+}
+
+/// Cancels the stop pending after a meeting ended; the recording then goes on until stopped by hand.
+#[tauri::command]
+pub fn keep_recording_after_meeting_end() {
+    KEEP_RECORDING.store(true, Ordering::Release);
 }
 
 #[tauri::command]
@@ -418,16 +509,61 @@ mod tests {
     }
 
     #[test]
-    fn a_suggested_start_is_not_repeated_nor_auto_stopped() {
+    fn a_suggested_start_is_not_repeated() {
         let mut c = Clock::new();
         c.at(0, true, false);
         assert_eq!(c.at(6, true, false), Some(DetectorAction::StartRecording));
         c.state.start_handed_to_user();
         assert_eq!(c.at(20, true, false), None);
-        // The user presses Record: that recording is theirs
+        assert_eq!(c.at(200, true, false), None);
+    }
+
+    #[test]
+    fn a_recording_started_from_the_suggestion_stops_when_the_meeting_ends() {
+        let mut c = Clock::new();
+        c.at(0, true, false);
+        c.at(6, true, false);
+        c.state.start_handed_to_user();
         assert_eq!(c.at(30, true, true), None);
+        assert!(c.state.watching_meeting_end());
         assert_eq!(c.at(100, false, true), None);
-        assert_eq!(c.at(200, false, true), None);
+        assert_eq!(c.at(120, false, true), Some(DetectorAction::StopRecording));
+    }
+
+    #[test]
+    fn an_ignored_suggestion_is_offered_again_for_the_next_meeting() {
+        let mut c = Clock::new();
+        c.at(0, true, false);
+        c.at(6, true, false);
+        c.state.start_handed_to_user();
+        c.at(50, false, false);
+        c.at(60, true, false);
+        assert_eq!(c.at(66, true, false), Some(DetectorAction::StartRecording));
+    }
+
+    #[test]
+    fn a_manual_recording_is_not_watched() {
+        let mut c = Clock::new();
+        c.at(0, false, true);
+        assert!(!c.state.watching_meeting_end());
+    }
+
+    #[test]
+    fn the_stop_waits_for_the_countdown_and_can_be_kept() {
+        let start = Instant::now();
+        let deadline = start + STOP_COUNTDOWN;
+        assert_eq!(countdown_outcome(start, deadline, true, false), CountdownOutcome::Waiting);
+        assert_eq!(countdown_outcome(deadline, deadline, true, false), CountdownOutcome::Stop);
+        assert_eq!(countdown_outcome(start, deadline, true, true), CountdownOutcome::KeptByUser);
+        assert_eq!(countdown_outcome(deadline, deadline, true, true), CountdownOutcome::KeptByUser);
+        assert_eq!(countdown_outcome(start, deadline, false, false), CountdownOutcome::AlreadyStopped);
+    }
+
+    #[test]
+    fn detection_suggests_until_the_user_chooses_otherwise() {
+        assert_eq!(settings_from(None).effective_mode(), DetectionMode::Suggest);
+        assert_eq!(settings_from(Some(serde_json::json!({"mode": "off"}))).effective_mode(), DetectionMode::Off);
+        assert_eq!(settings_from(Some(serde_json::json!({"mode": "auto"}))).effective_mode(), DetectionMode::Auto);
     }
 
     #[test]
@@ -440,14 +576,16 @@ mod tests {
     }
 
     #[test]
-    fn coreaudio_is_left_alone_while_recording_unless_auto_mode_needs_the_meeting_end() {
-        assert!(should_query(DetectionMode::Suggest, false, None));
-        assert!(should_query(DetectionMode::Auto, false, Some(Duration::from_secs(1))));
-        assert!(!should_query(DetectionMode::Suggest, true, None));
-        assert!(!should_query(DetectionMode::Off, false, None));
-        assert!(should_query(DetectionMode::Auto, true, None));
-        assert!(!should_query(DetectionMode::Auto, true, Some(Duration::from_secs(9))));
-        assert!(should_query(DetectionMode::Auto, true, Some(Duration::from_secs(10))));
+    fn coreaudio_is_left_alone_while_recording_unless_the_meeting_end_is_watched() {
+        assert!(should_query(DetectionMode::Suggest, false, false, None));
+        assert!(should_query(DetectionMode::Auto, false, false, Some(Duration::from_secs(1))));
+        assert!(!should_query(DetectionMode::Suggest, true, false, None));
+        assert!(!should_query(DetectionMode::Auto, true, false, None));
+        assert!(!should_query(DetectionMode::Off, false, false, None));
+        assert!(should_query(DetectionMode::Suggest, true, true, None));
+        assert!(should_query(DetectionMode::Auto, true, true, None));
+        assert!(!should_query(DetectionMode::Auto, true, true, Some(Duration::from_secs(9))));
+        assert!(should_query(DetectionMode::Auto, true, true, Some(Duration::from_secs(10))));
     }
 
     #[test]
