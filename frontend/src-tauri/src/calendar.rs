@@ -38,12 +38,16 @@ pub struct CalendarNamingSettings {
     pub enabled: bool,
 }
 
+/// Never configured: on. Nothing is read until macOS calendar access is granted.
+fn settings_from(stored: Option<serde_json::Value>) -> CalendarNamingSettings {
+    match stored {
+        Some(value) => serde_json::from_value(value).unwrap_or_default(),
+        None => CalendarNamingSettings { enabled: true },
+    }
+}
+
 fn load_settings<R: Runtime>(app: &AppHandle<R>) -> CalendarNamingSettings {
-    app.store(STORE_FILE)
-        .ok()
-        .and_then(|store| store.get(STORE_KEY))
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default()
+    settings_from(app.store(STORE_FILE).ok().and_then(|store| store.get(STORE_KEY)))
 }
 
 fn save_settings<R: Runtime>(app: &AppHandle<R>, settings: &CalendarNamingSettings) -> Result<(), String> {
@@ -221,7 +225,13 @@ pub async fn get_current_calendar_event_title<R: Runtime>(app: AppHandle<R>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::display_name;
+    use super::{display_name, settings_from};
+
+    #[test]
+    fn calendar_naming_is_on_until_the_user_turns_it_off() {
+        assert!(settings_from(None).enabled);
+        assert!(!settings_from(Some(serde_json::json!({"enabled": false}))).enabled);
+    }
 
     #[test]
     fn emails_become_readable_names() {

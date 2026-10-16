@@ -1,14 +1,16 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Mic, Volume2 } from 'lucide-react';
+import { CalendarDays, Mic, Volume2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { OnboardingContainer } from '../OnboardingContainer';
 import { PermissionRow } from '../shared';
 import { useOnboarding } from '@/contexts/OnboardingContext';
+import type { PermissionStatus } from '@/types/onboarding';
 
 export function PermissionsStep() {
   const { setPermissionStatus, setPermissionsSkipped, permissions, completeOnboarding } = useOnboarding();
   const [isPending, setIsPending] = useState(false);
+  const [calendar, setCalendar] = useState<PermissionStatus>('not_determined');
 
   // Check permissions - only logs current state, doesn't auto-authorize
   // Actual permission checks are done via explicit user actions (clicking Enable)
@@ -93,6 +95,26 @@ export function PermissionsStep() {
     }
   };
 
+  // Optional: names meetings and suggests speaker names from calendar events
+  const handleCalendarAction = async () => {
+    if (calendar === 'denied') {
+      invoke('open_system_settings', { preferencePane: 'Privacy_Calendars' }).catch(err =>
+        console.error('[PermissionsStep] Failed to open calendar settings:', err)
+      );
+      return;
+    }
+    setIsPending(true);
+    try {
+      const granted = await invoke<boolean>('set_calendar_naming_enabled', { enabled: true });
+      setCalendar(granted ? 'authorized' : 'denied');
+    } catch (err) {
+      console.error('[PermissionsStep] Failed to request calendar access:', err);
+      setCalendar('denied');
+    } finally {
+      setIsPending(false);
+    }
+  };
+
   const handleFinish = async () => {
     try {
       await completeOnboarding();
@@ -141,6 +163,15 @@ export function PermissionsStep() {
             status={permissions.systemAudio}
             isPending={isPending}
             onAction={handleSystemAudioAction}
+          />
+
+          <PermissionRow
+            icon={<CalendarDays className="w-5 h-5" />}
+            title="Calendar (optional)"
+            description="Names meetings and speakers from your calendar events"
+            status={calendar}
+            isPending={isPending}
+            onAction={handleCalendarAction}
           />
         </div>
 
