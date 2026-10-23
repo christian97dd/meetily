@@ -2,8 +2,9 @@
 //! suggests recording (notification + in-app banner) or, in auto mode, starts a recording and stops it
 //! once the app releases the microphone.
 //!
-//! "Meeting app using the mic" is read from CoreAudio's per-process state (macOS 14.2+), so a call
-//! is detected no matter which tab or window it runs in. The detector only stops recordings it
+//! "Meeting app using the mic" is read from CoreAudio's per-process state (macOS 14.2+), or on Linux
+//! from the PulseAudio/PipeWire recording streams, so a call is detected no matter which tab or
+//! window it runs in. The detector only stops recordings it
 //! started itself; manual recordings are never touched.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -205,7 +206,63 @@ fn meeting_apps_using_mic() -> Vec<String> {
         .collect()
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Linux executables whose recording stream means "in a meeting" (browsers cover Google Meet).
+#[cfg(any(target_os = "linux", test))]
+const LINUX_MEETING_BINARIES: &[&str] = &[
+    "chrome", "google-chrome", "chromium", "chromium-browser", "brave", "brave-browser", "msedge",
+    "microsoft-edge", "vivaldi-bin", "opera", "firefox", "firefox-bin", "zoom", "teams", "teams-for-linux",
+    "slack", "discord", "Discord",
+];
+
+/// Executables of the meeting apps recording audio, from `pactl list source-outputs` (PulseAudio,
+/// or PipeWire through pipewire-pulse). Property keys aren't localized, unlike the block headers.
+#[cfg(any(target_os = "linux", test))]
+fn linux_meeting_apps(pactl_output: &str, own_pid: u32) -> Vec<String> {
+    let mut apps = Vec::new();
+    let mut flush = |binary: &mut Option<String>, pid: &mut Option<u32>| {
+        if let Some(binary) = binary.take() {
+            if pid.take() != Some(own_pid) && LINUX_MEETING_BINARIES.contains(&binary.as_str()) && !apps.contains(&binary) {
+                apps.push(binary);
+            }
+        }
+        *pid = None;
+    };
+    let (mut binary, mut pid) = (None, None);
+    for line in pactl_output.lines() {
+        if !line.starts_with(char::is_whitespace) {
+            flush(&mut binary, &mut pid);
+            continue;
+        }
+        let Some((key, value)) = line.trim().split_once(" = ") else { continue };
+        let value = value.trim_matches('"');
+        match key {
+            "application.process.binary" => binary = Some(value.to_string()),
+            "application.process.id" => pid = value.parse().ok(),
+            _ => {}
+        }
+    }
+    flush(&mut binary, &mut pid);
+    apps
+}
+
+#[cfg(target_os = "linux")]
+fn meeting_apps_using_mic() -> Vec<String> {
+    match std::process::Command::new("pactl").args(["list", "source-outputs"]).env("LC_ALL", "C").output() {
+        Ok(output) if output.status.success() => {
+            linux_meeting_apps(&String::from_utf8_lossy(&output.stdout), std::process::id())
+        }
+        Ok(output) => {
+            log::warn!("Meeting detector: pactl failed: {}", String::from_utf8_lossy(&output.stderr).trim());
+            Vec::new()
+        }
+        Err(e) => {
+            log::warn!("Meeting detector: pactl unavailable ({}), install pulseaudio-utils to detect meetings", e);
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn meeting_apps_using_mic() -> Vec<String> {
     Vec::new()
 }
@@ -448,6 +505,37 @@ mod tests {
         assert!(should_query(DetectionMode::Auto, true, None));
         assert!(!should_query(DetectionMode::Auto, true, Some(Duration::from_secs(9))));
         assert!(should_query(DetectionMode::Auto, true, Some(Duration::from_secs(10))));
+    }
+
+    #[test]
+    fn linux_meeting_apps_are_read_from_pactl_recording_streams() {
+        let output = "Source Output #41
+\tDriver: PipeWire
+\tProperties:
+\t\tapplication.name = \"Google Chrome\"
+\t\tapplication.process.id = \"2210\"
+\t\tapplication.process.binary = \"chrome\"
+Source Output #42
+\tProperties:
+\t\tapplication.process.id = \"900\"
+\t\tapplication.process.binary = \"meetily\"
+Source Output #43
+\tProperties:
+\t\tapplication.process.binary = \"zoom\"
+\t\tapplication.process.id = \"3300\"
+Salida de fuente #44
+\tPropiedades:
+\t\tapplication.process.binary = \"chrome\"
+\t\tapplication.process.id = \"2211\"
+";
+        assert_eq!(linux_meeting_apps(output, 900), vec!["chrome".to_string(), "zoom".to_string()]);
+        assert_eq!(linux_meeting_apps("", 900), Vec::<String>::new());
+    }
+
+    #[test]
+    fn our_own_recording_stream_is_not_a_meeting() {
+        let output = "Source Output #1\n\tProperties:\n\t\tapplication.process.binary = \"chrome\"\n\t\tapplication.process.id = \"77\"\n";
+        assert!(linux_meeting_apps(output, 77).is_empty());
     }
 
     #[test]
