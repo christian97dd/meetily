@@ -4,6 +4,8 @@ import { useEffect, useState, useRef } from "react"
 import { Switch } from "./ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select"
 import { Textarea } from "./ui/textarea"
+import { Input } from "./ui/input"
+import { Button } from "./ui/button"
 import { Copy, FolderOpen, RefreshCw } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
 import Analytics from "@/lib/analytics"
@@ -90,18 +92,32 @@ function AppearanceSelect() {
   );
 }
 
+interface CalendarNamingStatus {
+  enabled: boolean;
+  source: 'system' | 'ics';
+  ics_url_set: boolean;
+}
+
 function CalendarNamingSwitch() {
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [accessDenied, setAccessDenied] = useState(false);
+  const [status, setStatus] = useState<CalendarNamingStatus | null>(null);
 
   useEffect(() => {
-    invoke<{ enabled: boolean }>('get_calendar_naming_settings')
-      .then((settings) => setEnabled(settings.enabled))
+    invoke<CalendarNamingStatus>('get_calendar_naming_settings')
+      .then((settings) => {
+        setEnabled(settings.enabled);
+        setStatus(settings);
+      })
       .catch((error) => {
         console.error('Failed to load calendar settings:', error);
         setEnabled(false);
       });
   }, []);
+
+  if (status?.source === 'ics') {
+    return <CalendarFeedSettings status={status} onChange={setStatus} />;
+  }
 
   const handleChange = async (next: boolean) => {
     setEnabled(next);
@@ -130,6 +146,67 @@ function CalendarNamingSwitch() {
         )}
       </div>
       <Switch checked={enabled ?? false} disabled={enabled === null} onCheckedChange={handleChange} />
+    </div>
+  );
+}
+
+/** Where there is no system calendar (Linux): reads the calendar from its private iCal address. */
+function CalendarFeedSettings({ status, onChange }: { status: CalendarNamingStatus; onChange: (status: CalendarNamingStatus) => void }) {
+  const [url, setUrl] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const save = async (address: string) => {
+    setSaving(true);
+    setError(null);
+    try {
+      onChange(await invoke<CalendarNamingStatus>('set_calendar_ics_url', { url: address }));
+      setUrl('');
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const toggle = async (next: boolean) => {
+    try {
+      const nowEnabled = await invoke<boolean>('set_calendar_naming_enabled', { enabled: next });
+      onChange({ ...status, enabled: nowEnabled });
+    } catch (e) {
+      console.error('Failed to save calendar settings:', e);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <h3 className="text-lg font-semibold text-foreground mb-2">Name meetings from calendar</h3>
+          <p className="text-sm text-muted-foreground">
+            Uses the title and invitees of the event happening when you record. Paste your calendar&apos;s private address: in Google Calendar, Settings → your calendar → Integrate calendar → Secret address in iCal format. Keep it private: anyone with it can read your calendar.
+          </p>
+        </div>
+        <Switch checked={status.enabled} disabled={!status.ics_url_set} onCheckedChange={toggle} />
+      </div>
+      <div className="flex gap-2">
+        <Input
+          type="password"
+          autoComplete="off"
+          placeholder={status.ics_url_set ? 'Address saved. Paste a new one to replace it' : 'https://calendar.google.com/calendar/ical/…/basic.ics'}
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+        />
+        <Button disabled={saving || !url.trim()} onClick={() => save(url)}>
+          {saving ? 'Checking…' : 'Save'}
+        </Button>
+        {status.ics_url_set && (
+          <Button variant="outline" disabled={saving} onClick={() => save('')}>
+            Remove
+          </Button>
+        )}
+      </div>
+      {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
     </div>
   );
 }

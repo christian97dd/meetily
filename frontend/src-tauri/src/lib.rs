@@ -39,6 +39,7 @@ pub mod analytics;
 pub mod api;
 pub mod audio;
 pub mod calendar;
+pub mod calendar_ics;
 pub mod config;
 pub mod console_utils;
 pub mod database;
@@ -844,6 +845,7 @@ pub fn run() {
             meeting_detector::get_meeting_detection_settings,
             calendar::get_calendar_naming_settings,
             calendar::set_calendar_naming_enabled,
+            calendar::set_calendar_ics_url,
             calendar::get_current_calendar_event_title,
             meeting_detector::set_meeting_detection_settings,
             onboarding::save_onboarding_status_cmd,
