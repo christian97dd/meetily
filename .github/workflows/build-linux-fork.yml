@@ -1,0 +1,111 @@
+name: Build Linux (fork)
+
+# Unsigned x86_64 .deb and AppImage for personal use: needs no updater or license secrets.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: build-linux-fork-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Runners and target machines may lack AVX; keep whisper.cpp on the portable path
+  WHISPER_NO_AVX: ON
+  WHISPER_NO_AVX2: ON
+
+jobs:
+  test:
+    name: Rust tests (Linux)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
+            libasound2-dev libopenblas-dev libx11-dev libxtst-dev libxrandr-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          key: fork-linux-test
+
+      # tauri-build checks that every externalBin exists; tests don't need the real sidecar
+      - name: Stub llama-helper sidecar
+        run: |
+          mkdir -p frontend/src-tauri/binaries
+          touch frontend/src-tauri/binaries/llama-helper-x86_64-unknown-linux-gnu
+
+      - name: Run tests
+        run: cargo test -p meetily --lib
+
+  build:
+    name: Build .deb and AppImage (x86_64)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
+            libasound2-dev libopenblas-dev libx11-dev libxtst-dev libxrandr-dev fuse libfuse2
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          key: fork-linux-build
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Build llama-helper sidecar
+        run: |
+          cargo build --release -p llama-helper
+          mkdir -p frontend/src-tauri/binaries
+          cp target/release/llama-helper frontend/src-tauri/binaries/llama-helper-x86_64-unknown-linux-gnu
+
+      - name: Build app
+        working-directory: frontend
+        run: pnpm tauri build --target x86_64-unknown-linux-gnu --features openblas --bundles deb,appimage
+
+      # Bundling the build machine's libwayland-client breaks the AppImage on newer distros
+      - name: Remove libwayland-client from the AppImage
+        working-directory: target/x86_64-unknown-linux-gnu/release/bundle/appimage
+        run: |
+          APPIMAGE=$(ls *.AppImage | head -1)
+          chmod +x "$APPIMAGE"
+          "./$APPIMAGE" --appimage-extract >/dev/null
+          find squashfs-root -name "libwayland-client.so*" -delete
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
+          ARCH=x86_64 ./appimagetool-x86_64.AppImage --no-appstream squashfs-root "$APPIMAGE"
+          rm -rf squashfs-root appimagetool-x86_64.AppImage
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: meetily-linux-x86_64-${{ github.sha }}
+          path: |
+            target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
+            target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+          retention-days: 30
