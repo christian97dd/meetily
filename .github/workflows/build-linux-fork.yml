@@ -3,6 +3,9 @@ name: Build Linux (fork)
 # Unsigned x86_64 .deb and AppImage for personal use: needs no updater or license secrets.
 on:
   workflow_dispatch:
+  # Manual runs need the workflow on main; until then, Linux branches build on push
+  push:
+    branches: ['feat/linux-*']
 
 concurrency:
   group: build-linux-fork-${{ github.ref }}
