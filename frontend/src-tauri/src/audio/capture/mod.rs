@@ -7,6 +7,9 @@ pub mod backend_config;
 #[cfg(target_os = "macos")]
 pub mod core_audio;
 
+#[cfg(any(target_os = "linux", test))]
+pub mod pulse_monitor;
+
 // Re-export capture functionality
 pub use system::{
     SystemAudioCapture, SystemAudioStream,

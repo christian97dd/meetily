@@ -22,6 +22,12 @@ pub enum StreamBackend {
     CoreAudio {
         task: Option<tokio::task::JoinHandle<()>>,
     },
+    /// `parec` recording the default output's monitor (Linux only)
+    #[cfg(target_os = "linux")]
+    PulseMonitor {
+        child: std::process::Child,
+        reader: Option<std::thread::JoinHandle<()>>,
+    },
 }
 
 // SAFETY: While Stream doesn't implement Send, we ensure it's only accessed
@@ -85,6 +91,13 @@ impl AudioStream {
         if use_core_audio {
             info!("🎵 Stream: Using Core Audio backend (cidre) for system audio");
             return Self::create_core_audio_stream(device, state, device_type, recording_sender).await;
+        }
+
+        // cpal can't record what Linux plays; the sound server's monitor can
+        #[cfg(target_os = "linux")]
+        if device_type == DeviceType::System {
+            info!("🎵 Stream: Using the PulseAudio/PipeWire monitor for system audio");
+            return Self::create_pulse_monitor_stream(device, state, device_type, recording_sender);
         }
 
         // Default path: use CPAL
@@ -233,6 +246,56 @@ impl AudioStream {
         })
     }
 
+    /// System audio on Linux, read from `parec` on a thread of its own (Linux only)
+    #[cfg(target_os = "linux")]
+    fn create_pulse_monitor_stream(
+        device: Arc<AudioDevice>,
+        state: Arc<RecordingState>,
+        device_type: DeviceType,
+        recording_sender: Option<mpsc::UnboundedSender<super::recording_state::AudioChunk>>,
+    ) -> Result<Self> {
+        use std::io::Read;
+        use super::capture::pulse_monitor;
+
+        let mut child = pulse_monitor::spawn()?;
+        let mut stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("parec has no output"))?;
+        let capture = AudioCapture::new(
+            device.clone(),
+            state,
+            pulse_monitor::SAMPLE_RATE,
+            1,
+            device_type,
+            recording_sender,
+        );
+
+        let reader = std::thread::Builder::new().name("system-audio-monitor".into()).spawn(move || {
+            let mut buffer = [0u8; 4096];
+            let mut pending = Vec::new();
+            loop {
+                match stdout.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        let samples = pulse_monitor::decode(&mut pending, &buffer[..read]);
+                        if !samples.is_empty() {
+                            capture.process_audio_data(&samples);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("System audio monitor: read failed: {}", e);
+                        break;
+                    }
+                }
+            }
+            info!("System audio monitor: stream ended");
+        })?;
+
+        info!("✅ Stream: system audio monitor started for {}", device.name);
+        Ok(Self {
+            device,
+            backend: StreamBackend::PulseMonitor { child, reader: Some(reader) },
+        })
+    }
+
     /// Build stream based on sample format
     fn build_stream(
         device: &Device,
@@ -341,6 +404,17 @@ impl AudioStream {
                     // This helps ensure Arc references in the closure are dropped
                     std::thread::sleep(std::time::Duration::from_millis(50));
                     info!("Core Audio task aborted");
+                }
+            }
+            #[cfg(target_os = "linux")]
+            StreamBackend::PulseMonitor { mut child, reader } => {
+                // Ending parec closes its output, which ends the reader thread
+                if let Err(e) = child.kill() {
+                    warn!("Failed to stop parec: {}", e);
+                }
+                let _ = child.wait();
+                if let Some(reader) = reader {
+                    let _ = reader.join();
                 }
             }
         }
